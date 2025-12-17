@@ -20,6 +20,11 @@ import signal
 # from poolagent.pool import Pool as CuetipEnv, State as CuetipState
 # from poolagent import FunctionAgent
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+
 from bayes_opt import BayesianOptimization, SequentialDomainReductionTransformer
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern
@@ -379,19 +384,168 @@ class BasicAgent(Agent):
             traceback.print_exc()
             return self._random_action()
 
+class SimpleNN(nn.Module):
+    """简单的前馈神经网络模型"""
+    
+    def __init__(self, input_size, hidden_size=128):
+        super(SimpleNN, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, 5)  # 输出5个击球参数
+    
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
+
 class NewAgent(Agent):
-    """自定义 Agent 模板（待学生实现）"""
+    """基于神经网络的自定义 Agent"""
     
     def __init__(self):
-        pass
+        super().__init__()
+        # 定义神经网络输入大小
+        # 每个球有3个位置坐标 + 1个是否进袋标志，共16个球
+        # 球桌有2个尺寸参数
+        # 目标球有15个二进制标志（1-15号球）
+        self.input_size = 16 * 4 + 2 + 15
+        self.net = SimpleNN(self.input_size)
+        
+        # 初始化神经网络参数
+        for m in self.net.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
+        
+        # 训练相关属性
+        self.optimizer = None
+        self.lr = 1e-4
+        
+        print("NewAgent (Simple NN) 已初始化。")
+    
+    def set_train_mode(self):
+        """设置为训练模式"""
+        self.net.train()
+        
+        # 初始化优化器（如果尚未初始化）
+        if self.optimizer is None:
+            self.optimizer = optim.Adam(self.net.parameters(), lr=self.lr)
+    
+    def set_eval_mode(self):
+        """设置为评估模式"""
+        self.net.eval()
+    
+    def save_model(self, path):
+        """保存模型到文件"""
+        import os
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save({
+            'model_state_dict': self.net.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict() if self.optimizer else None,
+            'lr': self.lr
+        }, path)
+        print(f"模型已保存到: {path}")
+    
+    def load_model(self, path):
+        """从文件加载模型"""
+        import os
+        if os.path.exists(path):
+            checkpoint = torch.load(path)
+            self.net.load_state_dict(checkpoint['model_state_dict'])
+            
+            if checkpoint.get('optimizer_state_dict') and self.optimizer:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            if checkpoint.get('lr'):
+                self.lr = checkpoint['lr']
+                if self.optimizer:
+                    for param_group in self.optimizer.param_groups:
+                        param_group['lr'] = self.lr
+            
+            print(f"模型已从 {path} 加载")
+        else:
+            print(f"警告: 模型文件 {path} 不存在")
+    
+    def update(self, loss):
+        """更新模型参数"""
+        if self.optimizer is None:
+            self.set_train_mode()
+        
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)  # 梯度裁剪
+        self.optimizer.step()
+    
+    def _preprocess_observation(self, balls, my_targets, table):
+        """将观测转换为神经网络输入向量"""
+        # 球的状态向量
+        ball_features = []
+        ball_ids = ['cue', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15']
+        
+        for bid in ball_ids:
+            if bid in balls:
+                # 获取球的位置
+                pos = balls[bid].state.rvw[0]
+                # 检查是否进袋
+                pocketed = 1.0 if balls[bid].state.s == 4 else 0.0
+                # 添加到特征向量
+                ball_features.extend([pos[0], pos[1], pos[2], pocketed])
+            else:
+                # 如果球不存在，用0填充
+                ball_features.extend([0.0, 0.0, 0.0, 1.0])  # 假设已经进袋
+        
+        # 球桌尺寸特征
+        table_features = [table.w, table.l]
+        
+        # 目标球特征
+        target_features = [1.0 if str(i) in my_targets else 0.0 for i in range(1, 16)]
+        
+        # 组合所有特征
+        features = np.array(ball_features + table_features + target_features, dtype=np.float32)
+        return features
     
     def decision(self, balls=None, my_targets=None, table=None):
-        """决策方法
+        """使用神经网络进行决策
         
         参数：
-            observation: (balls, my_targets, table)
+            balls: 球状态字典
+            my_targets: 目标球ID列表
+            table: 球桌对象
         
         返回：
-            dict: {'V0', 'phi', 'theta', 'a', 'b'}
+            dict: 击球动作 {'V0', 'phi', 'theta', 'a', 'b'}
         """
-        return self._random_action()
+        if balls is None or table is None:
+            return self._random_action()
+        
+        try:
+            # 预处理观测
+            features = self._preprocess_observation(balls, my_targets, table)
+            
+            # 转换为PyTorch张量
+            input_tensor = torch.tensor(features).unsqueeze(0)
+            
+            # 使用模型预测
+            with torch.no_grad():
+                outputs = self.net(input_tensor)
+            
+            # 将输出映射到合理范围
+            V0 = F.sigmoid(outputs[0, 0]) * 7.5 + 0.5  # [0.5, 8.0]
+            phi = F.sigmoid(outputs[0, 1]) * 360  # [0, 360]
+            theta = F.sigmoid(outputs[0, 2]) * 90  # [0, 90]
+            a = (outputs[0, 3]) * 0.5  # [-0.5, 0.5]
+            b = (outputs[0, 4]) * 0.5  # [-0.5, 0.5]
+            
+            # 转换为字典格式
+            action = {
+                'V0': float(V0),
+                'phi': float(phi),
+                'theta': float(theta),
+                'a': float(a),
+                'b': float(b)
+            }
+            
+            return action
+        except Exception as e:
+            print(f"[NewAgent] 决策时发生错误，使用随机动作。原因: {e}")
+            return self._random_action()
