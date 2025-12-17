@@ -533,8 +533,8 @@ class NewAgent(Agent):
             V0 = F.sigmoid(outputs[0, 0]) * 7.5 + 0.5  # [0.5, 8.0]
             phi = F.sigmoid(outputs[0, 1]) * 360  # [0, 360]
             theta = F.sigmoid(outputs[0, 2]) * 90  # [0, 90]
-            a = (outputs[0, 3]) * 0.5  # [-0.5, 0.5]
-            b = (outputs[0, 4]) * 0.5  # [-0.5, 0.5]
+            a = (F.sigmoid(outputs[0, 3]) - 0.5) * 2 * 0.5  # [-0.5, 0.5]
+            b = (F.sigmoid(outputs[0, 4]) - 0.5) * 2 * 0.5  # [-0.5, 0.5]
             
             # 转换为字典格式
             action = {
