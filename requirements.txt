@@ -1,0 +1,14 @@
+# AI3603-Billiards Project Requirements
+
+# Core libraries
+pooltool
+numpy
+
+# PyTorch for neural networks
+torch
+
+# Bayesian optimization for BasicAgent
+bayesian-optimization
+
+# Scikit-learn for Gaussian Process Regressor
+scikit-learn
