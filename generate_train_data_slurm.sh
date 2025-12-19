@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=generate_data
-#SBATCH --partition=a100
+#SBATCH --partition=debuga100
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
