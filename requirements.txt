@@ -12,3 +12,5 @@ bayesian-optimization
 
 # Scikit-learn for Gaussian Process Regressor
 scikit-learn
+
+tqdm
