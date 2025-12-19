@@ -171,8 +171,8 @@ def main():
     # 环境参数
     parser.add_argument('--enable_noise', action='store_true', default=True,
                       help="是否启用动作噪声 (默认: 启用)")
-    parser.add_argument('--max_hit_count', type=int, default=200,
-                      help="每局最大击球次数 (默认: 200)")
+    parser.add_argument('--max_hit_count', type=int, default=60,
+                      help="每局最大击球次数 (默认: 60)")
     
     # 运行模式控制
     parser.add_argument('--skip_generation', action='store_true',
