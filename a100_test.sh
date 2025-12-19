@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1            #若使用 2 块卡，就给 gres=gpu:2
 #SBATCH --mail-type=end
-#SBATCH --mail-user=YOU@EMAIL.COM
+#SBATCH --mail-user=1iwenta0@sjtu.edu.cn
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
 
