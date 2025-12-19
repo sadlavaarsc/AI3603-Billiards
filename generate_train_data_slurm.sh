@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=pool_train
+#SBATCH --job-name=generate_data
 #SBATCH --partition=a100
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -17,7 +17,7 @@ source activate poolenv                    # [MODIFY 2] Activate your poolenv en
 
 # -------------------------- Start Training Script --------------------------
 # [MODIFY 3] Start train.py (please replace with the absolute path of train.py, e.g., /dssg/home/acct-stu/stu337/train.py)
-python /dssg/home/acct-stu/stu337/AI3603-Billiards/train.py
+python /dssg/home/acct-stu/stu337/AI3603-Billiards/generate_train_data.py --num_matches 100000
 
 # If train.py needs parameters, example:
 # python /dssg/home/acct-stu/stu337/train.py --epochs 100 --batch_size 64 --lr 0.001
