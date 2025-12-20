@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=generate_data
-#SBATCH --partition=64c512g
+#SBATCH --partition=cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=20
 #SBATCH --mail-type=end
