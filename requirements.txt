@@ -1,7 +1,6 @@
 # AI3603-Billiards Project Requirements
 
 # Core libraries
-pooltool
 numpy
 
 # PyTorch for neural networks

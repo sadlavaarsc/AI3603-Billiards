@@ -10,14 +10,20 @@ from datetime import datetime
 from poolenv import PoolEnv
 from agent import BasicAgent
 
-def save_match_data(match_data, output_dir):
+def save_match_data(match_data, output_dir, match_id=None):
     """保存单局比赛数据到文件"""
     # 确保输出目录存在
     os.makedirs(output_dir, exist_ok=True)
     
     # 生成文件名
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    filename = f"match_{timestamp}.json"
+    if match_id is not None:
+        # 使用指定的ID
+        filename = f"match_{match_id:06d}.json"
+    else:
+        # 向后兼容，使用时间戳
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        filename = f"match_{timestamp}.json"
+    
     filepath = os.path.join(output_dir, filename)
     
     # 保存数据
@@ -150,7 +156,7 @@ def play_match(env, agent, enable_noise=True, max_hit_count=200, verbose=False):
     
     return match_data
 
-def generate_matches(num_matches, output_dir, enable_noise=True, max_hit_count=200, verbose=False):
+def generate_matches(num_matches, output_dir, enable_noise=True, max_hit_count=200, verbose=False, start_id=None):
     """生成指定数量的比赛数据
     
     Args:
@@ -159,6 +165,7 @@ def generate_matches(num_matches, output_dir, enable_noise=True, max_hit_count=2
         enable_noise: 是否启用动作噪声
         max_hit_count: 最大击球次数
         verbose: 是否打印详细信息
+        start_id: 起始ID，如果提供则使用ID范围生成
     
     Returns:
         list: 生成的文件路径列表
@@ -171,7 +178,11 @@ def generate_matches(num_matches, output_dir, enable_noise=True, max_hit_count=2
     for i in tqdm(range(num_matches), desc="生成对局数据"):
         try:
             match_data = play_match(env, agent, enable_noise, max_hit_count, verbose)
-            file_path = save_match_data(match_data, output_dir)
+            
+            # 计算当前对局的ID
+            match_id = start_id + i if start_id is not None else None
+            
+            file_path = save_match_data(match_data, output_dir, match_id=match_id)
             file_paths.append(file_path)
             
             if verbose:
@@ -189,6 +200,7 @@ if __name__ == "__main__":
     parser.add_argument('--enable_noise', action='store_true', default=True, help="是否启用动作噪声")
     parser.add_argument('--max_hit_count', type=int, default=200, help="每局最大击球次数")
     parser.add_argument('--verbose', action='store_true', default=False, help="是否打印详细信息")
+    parser.add_argument('--start_id', type=int, default=None, help="起始ID，用于并行生成时避免文件冲突")
     
     args = parser.parse_args()
     
@@ -198,7 +210,8 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         enable_noise=args.enable_noise,
         max_hit_count=args.max_hit_count,
-        verbose=args.verbose
+        verbose=args.verbose,
+        start_id=args.start_id
     )
     
     print(f"成功生成 {len(file_paths)} 局比赛数据")

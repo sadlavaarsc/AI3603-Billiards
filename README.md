@@ -1,106 +1,116 @@
-# AI3603-Billiards
-AI3603课程台球大作业
+# 台球AI训练数据生成系统
 
-## 关键文件说明
+本系统用于生成台球AI的训练数据，包括对局数据生成和训练数据处理两大模块。
 
-| 文件 | 作用 | 在最终测试中是否可修改 |
-|------|------|-----------|
-| `poolenv.py` | 台球环境（游戏规则） | ❌ 不可修改 |
-| `agent.py` | Agent 定义（在 `NewAgent` 中实现你的算法） | ✅ 可修改 `NewAgent` |
-| `evaluate.py` | 评估脚本（运行对战） | ✅ 可修改 `agent_b` |
-| `PROJECT_GUIDE.md` | 项目详细指南 | 📖 参考文档 |
-| `GAME_RULES.md` | 游戏规则说明 | 📖 参考文档 |
-| `generate_matches.py` | 自对弈对局数据生成脚本 | ✅ 可修改 |
-| `process_match_data.py` | 对局数据处理脚本 | ✅ 可修改 |
-| `main.py` | 数据生成主控制脚本 | ✅ 可修改 |
+## 功能概述
 
-对作业内容的视频说明：
-说明.mp4：https://pan.sjtu.edu.cn/web/share/da9459405eac6252d01c249c3bcb989f
-供大家参考，以文字说明为准。
+1. **对局数据生成**：通过模拟台球对局，生成包含球的状态和击球动作的对局数据文件
+2. **训练数据处理**：将对局数据转换为神经网络训练所需的行为网络数据和价值网络数据
 
----
+## 并行化支持
 
-## 训练数据生成系统
+系统已支持异步并行生成和处理对局数据，适用于超算平台等多核心环境。通过设置不同脚本实例的ID范围，可以避免多核心并行时的文件读写冲突。
 
-本项目提供了一个完整的数据生成系统，用于通过贝叶斯AI自对弈生成台球AI训练数据，包括行为网络和价值网络的训练数据。
+## 文件结构
 
-### 系统架构
+- `generate_train_data.py`: 主流程脚本，协调对局数据生成和训练数据处理
+- `generate_matches.py`: 对局数据生成脚本
+- `process_match_data.py`: 训练数据处理脚本
 
-系统由以下几个主要组件组成：
+## 使用说明
 
-1. **generate_matches.py** - 自对弈对局数据生成脚本
-   - 调用贝叶斯AI (BasicAgent) 进行自对弈
-   - 记录完整的对局过程，包括状态、动作和结果
-   - 支持参数控制对局数量和环境设置
-
-2. **process_match_data.py** - 对局数据处理脚本
-   - 加载原始对局数据
-   - 转换为神经网络的输入特征（56维特征向量）
-   - 生成行为网络和价值网络的训练数据
-
-3. **main.py** - 主控制脚本
-   - 整合数据生成和处理的完整流程
-   - 提供灵活的参数配置选项
-   - 支持测试模式和环境验证
-
-### 使用方法
-
-#### 1. 基本使用 - 完整流程
-
-执行完整的数据生成和处理流程：
+### 1. 主流程脚本 (generate_train_data.py)
 
 ```bash
-python main.py --num_matches 100 --enable_noise
+python generate_train_data.py [参数]
 ```
 
-#### 2. 测试模式
+**参数说明**：
 
-使用少量数据快速测试整个流程：
+- `--num_matches`: 生成的对局数量 (默认: 1000)
+- `--match_dir`: 对局数据输出目录 (默认: ./match_data)
+- `--behavior_output_dir`: 行为网络数据输出目录 (默认: ./training_data/behavior)
+- `--value_output_dir`: 价值网络数据输出目录 (默认: ./training_data/value)
+- `--start_id`: 对局起始ID (默认: 0)
+- `--max_hit_count`: 每局最大击球次数 (默认: 50)
+- `--verbose`: 是否显示详细输出 (默认: False)
+
+### 2. 对局数据生成脚本 (generate_matches.py)
 
 ```bash
-python main.py --test_mode
+python generate_matches.py [参数]
 ```
 
-#### 3. 分步执行
+**参数说明**：
 
-仅生成对局数据：
+- `--num_matches`: 生成的对局数量 (默认: 1000)
+- `--output_dir`: 对局数据输出目录 (默认: ./match_data)
+- `--start_id`: 对局起始ID (默认: 0)
+- `--max_hit_count`: 每局最大击球次数 (默认: 50)
+- `--verbose`: 是否显示详细输出 (默认: False)
+
+### 3. 训练数据处理脚本 (process_match_data.py)
 
 ```bash
-python main.py --num_matches 50 --skip_processing
+python process_match_data.py [参数]
 ```
 
-仅处理现有对局数据：
+**参数说明**：
 
+- `--match_dir`: 对局数据目录 (默认: ./match_data)
+- `--behavior_output_dir`: 行为网络数据输出目录 (默认: ./training_data/behavior)
+- `--value_output_dir`: 价值网络数据输出目录 (默认: ./training_data/value)
+- `--start_id`: 起始ID，用于文件名标识 (默认: None)
+- `--end_id`: 结束ID，用于文件名标识 (默认: None)
+
+## 并行处理示例
+
+假设我们需要在25个核心上生成和处理100,000个对局数据，每个核心处理4,000个对局。
+
+### 核心1:
 ```bash
-python main.py --skip_generation
+python generate_train_data.py --num_matches 4000 --start_id 0
 ```
 
-#### 4. 自定义目录
-
-指定自定义的数据保存目录：
-
+### 核心2:
 ```bash
-python main.py --num_matches 100 \
-    --match_dir "my_match_data" \
-    --behavior_dir "my_training_data/behavior" \
-    --value_dir "my_training_data/value"
+python generate_train_data.py --num_matches 4000 --start_id 4000
 ```
 
-### 参数说明
+### 核心3:
+```bash
+python generate_train_data.py --num_matches 4000 --start_id 8000
+```
 
-主要参数：
-- `--num_matches` - 生成的对局数量（默认：10）
-- `--test_mode` - 启用测试模式，使用少量数据快速测试
-- `--enable_noise` - 启用动作噪声（默认启用）
-- `--max_hit_count` - 每局最大击球次数（默认：200）
-- `--skip_generation` - 跳过对局数据生成，直接处理现有数据
-- `--skip_processing` - 跳过数据处理，只生成对局数据
+### ...以此类推
 
-### 数据格式
+### 核心25:
+```bash
+python generate_train_data.py --num_matches 4000 --start_id 96000
+```
 
-生成的数据包括：
-- 对局数据 (match_*.json) - 完整的比赛记录
-- 行为网络训练数据 (behavior_*.json) - 状态-动作对
-- 价值网络训练数据 (value_*.json) - 状态-胜率-步数预测
+## 注意事项
 
-每个状态使用56维特征向量表示，包含球的位置、速度和游戏状态等信息。
+1. 每个核心生成的对局数据文件使用ID命名，如`match_000001.json`，确保不会与其他核心生成的文件冲突
+2. 训练数据输出文件包含ID范围标识，如`behavior_network_data_0_3999_20231027_153045.json`
+3. 确保输出目录已存在或可由脚本创建
+4. 在超算平台上运行时，请根据平台特性调整命令执行方式
+5. 处理完成后，可以将所有核心生成的训练数据合并用于模型训练
+
+## 文件命名规则
+
+1. **对局数据文件**：`match_[ID].json`，其中ID为6位数字，如`match_000123.json`
+2. **训练数据文件**：
+   - 行为网络：`behavior_network_data_[start_id]_[end_id]_[timestamp].json`
+   - 价值网络：`value_network_data_[start_id]_[end_id]_[timestamp].json`
+
+## 常见问题
+
+1. **文件冲突**：确保每个并行实例使用不同的`start_id`参数值
+2. **内存占用**：对于大量对局数据，可能需要增加内存或减小单次处理的对局数量
+3. **磁盘空间**：生成大量对局数据时，请确保有足够的磁盘空间
+
+## 版本历史
+
+- 1.0: 初始版本
+- 1.1: 添加并行化支持，允许多核心同时生成和处理数据

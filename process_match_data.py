@@ -2,131 +2,107 @@ import os
 import json
 import argparse
 import numpy as np
+import time
 from tqdm import tqdm
 from datetime import datetime
 
 def load_single_match_data(file_path):
-    """加载单个对局数据文件
-    
-    Args:
-        file_path: 对局数据文件路径
-    
-    Returns:
-        dict or None: 对局数据字典，如果加载失败则返回None
-    """
+    """加载单个对局数据文件"""
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            match_data = json.load(f)
-            match_data['filename'] = os.path.basename(file_path)  # 记录文件名
-            return match_data
+            data = json.load(f)
+        return data
     except Exception as e:
-        print(f"加载文件 {os.path.basename(file_path)} 时出错: {e}")
+        print(f"加载对局数据文件 {file_path} 出错: {e}")
         return None
 
 def get_match_files(match_dir):
-    """获取指定目录下的所有对局数据文件
+    """获取指定目录下的所有对局数据文件"""
+    if not os.path.exists(match_dir):
+        print(f"对局数据目录不存在: {match_dir}")
+        return []
     
-    Args:
-        match_dir: 对局数据目录
+    # 获取所有以'match_'开头且以'.json'结尾的文件
+    match_files = []
+    for filename in os.listdir(match_dir):
+        if filename.startswith('match_') and filename.endswith('.json'):
+            # 尝试从文件名提取ID
+            try:
+                # 处理格式为match_000001.json的文件
+                if filename.count('_') == 1 and '.' in filename:
+                    id_part = filename.split('_')[1].split('.')[0]
+                    if id_part.isdigit():
+                        file_id = int(id_part)
+                        match_files.append((os.path.join(match_dir, filename), file_id))
+                # 处理格式为match_timestamp.json的旧文件
+                elif filename.count('_') >= 2:
+                    match_files.append((os.path.join(match_dir, filename), float('inf')))  # 旧文件给予无穷大ID
+            except:
+                # 如果无法提取ID，也添加到列表
+                match_files.append((os.path.join(match_dir, filename), float('inf')))
     
-    Returns:
-        list: 对局文件路径列表
-    """
-    match_files = [f for f in os.listdir(match_dir) if f.startswith('match_') and f.endswith('.json')]
-    return [os.path.join(match_dir, f) for f in match_files]
+    # 按ID排序
+    match_files.sort(key=lambda x: x[1])
+    
+    # 只返回文件路径列表
+    return [file_path for file_path, _ in match_files]
 
 def convert_balls_state_to_feature(balls_state):
-    """将球的状态转换为神经网络的输入特征
+    """将球的状态转换为特征向量"""
+    # 球的ID列表，包括白球(0)和1-15号球
+    ball_ids = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     
-    Args:
-        balls_state: 球的状态字典
+    features = []
+    for ball_id in ball_ids:
+        ball = balls_state.get(str(ball_id), {})
+        # 获取球的位置信息，如果不存在则使用默认值
+        x = ball.get('x', 0.0)
+        y = ball.get('y', 0.0)
+        z = ball.get('z', 0.0)
+        
+        # 获取球的速度信息
+        vx = ball.get('vx', 0.0)
+        vy = ball.get('vy', 0.0)
+        vz = ball.get('vz', 0.0)
+        
+        # 获取球的状态
+        s = ball.get('s', 0)
+        
+        # 将球的信息添加到特征向量中
+        features.extend([x, y, z, vx, vy, vz, s])
     
-    Returns:
-        numpy.ndarray: 56维特征向量（根据架构设计文档）
-    """
-    # 根据架构设计文档，特征包括：
-    # 14个目标球的x,y位置 (28维)
-    # 白球的x,y位置和速度 (4维)
-    # 目标球的剩余情况 (14维)
-    # 游戏状态编码 (10维)
-    
-    feature = np.zeros(56, dtype=np.float32)
-    
-    # 处理1-15号球的位置
-    for ball_id in range(1, 16):
-        if str(ball_id) in balls_state:
-            ball = balls_state[str(ball_id)]
-            # 检查球是否落袋 (状态s为4)
-            if ball.get('s', 0) == 4:
-                # 球已落袋，位置设为0
-                feature[(ball_id-1)*2] = 0.0
-                feature[(ball_id-1)*2 + 1] = 0.0
-            else:
-                # 球在台面上，记录位置
-                feature[(ball_id-1)*2] = ball.get('x', 0.0)
-                feature[(ball_id-1)*2 + 1] = ball.get('y', 0.0)
-    
-    # 处理白球位置和速度
-    if 'white' in balls_state:
-        white_ball = balls_state['white']
-        feature[28] = white_ball.get('x', 0.0)  # 白球x位置
-        feature[29] = white_ball.get('y', 0.0)  # 白球y位置
-        feature[30] = white_ball.get('vx', 0.0)  # 白球x速度
-        feature[31] = white_ball.get('vy', 0.0)  # 白球y速度
-    
-    # 目标球剩余情况 (14维)
-    # 对于1-14号球，检查是否还在台面上
-    for ball_id in range(1, 15):
-        if str(ball_id) in balls_state:
-            ball = balls_state[str(ball_id)]
-            # 0表示已落袋，1表示在台面上
-            feature[32 + (ball_id-1)] = 0.0 if ball.get('s', 0) == 4 else 1.0
-    
-    # 游戏状态编码 (10维) - 这里可以进一步完善，目前使用简化版本
-    # 暂时将这部分设为0
-    
-    return feature
+    return features
 
 def process_single_match_for_behavior(match_data, output_file, is_first_match=False, is_last_match=False):
-    """处理单个对局数据并实时写入行为网络数据文件
-    
-    Args:
-        match_data: 单个对局数据
-        output_file: 输出文件路径
-        is_first_match: 是否是第一个对局
-        is_last_match: 是否是最后一个对局
-    
-    Returns:
-        int: 生成的行为网络数据条数
-    """
+    """处理单个对局数据，生成行为网络训练数据"""
+    # 初始化行为网络数据记录列表
     behavior_records = []
-    winner = match_data['metadata'].get('winner', 0)
     
+    # 遍历对局中的每一次击球
     for shot in match_data.get('shots', []):
-        # 只记录获胜方的击球动作
-        if shot['player'] == winner:
-            # 转换特征
-            balls_state = shot['pre_state']['balls']
-            state_feature = convert_balls_state_to_feature(balls_state)
-            
-            # 获取动作参数
-            action = shot['action']
-            
-            # 记录行为数据
-            behavior_record = {
-                'state': state_feature.tolist(),
-                'action': {
-                    'V0': action.get('V0', 0.0),
-                    'phi': action.get('phi', 0.0),
-                    'theta': action.get('theta', 0.0),
-                    'a': action.get('a', 0.0),
-                    'b': action.get('b', 0.0)
-                },
-                'match_filename': match_data.get('filename', 'unknown'),
-                'shot_index': shot.get('hit_count', 0)
+        # 提取击球前的状态
+        pre_state = shot.get('pre_state', {})
+        balls_state = pre_state.get('balls', {})
+        
+        # 将球的状态转换为特征向量
+        state_feature = convert_balls_state_to_feature(balls_state)
+        
+        # 提取动作信息
+        action = shot.get('action', {})
+        
+        # 创建行为网络训练数据记录
+        behavior_record = {
+            'state': state_feature,
+            'action': {
+                'V0': action.get('V0', 0.0),
+                'phi': action.get('phi', 0.0),
+                'theta': action.get('theta', 0.0),
+                'a': action.get('a', 0.0),
+                'b': action.get('b', 0.0)
             }
-            
-            behavior_records.append(behavior_record)
+        }
+        
+        behavior_records.append(behavior_record)
     
     try:
         # 根据是否是第一个或最后一个对局，采用不同的写入方式
@@ -160,43 +136,34 @@ def process_single_match_for_behavior(match_data, output_file, is_first_match=Fa
     return len(behavior_records)
 
 def process_single_match_for_value(match_data, output_file, is_first_match=False, is_last_match=False):
-    """处理单个对局数据并实时写入价值网络数据文件
+    """处理单个对局数据，生成价值网络训练数据"""
+    # 获取对局结果
+    metadata = match_data.get('metadata', {})
+    winner = metadata.get('winner', 0)
     
-    Args:
-        match_data: 单个对局数据
-        output_file: 输出文件路径
-        is_first_match: 是否是第一个对局
-        is_last_match: 是否是最后一个对局
-    
-    Returns:
-        int: 生成的价值网络数据条数
-    """
+    # 初始化价值网络数据记录列表
     value_records = []
-    winner = match_data['metadata'].get('winner', 0)
-    total_shots = len(match_data.get('shots', []))
     
-    for shot_idx, shot in enumerate(match_data.get('shots', [])):
-        # 转换特征
-        balls_state = shot['pre_state']['balls']
+    # 遍历对局中的每一次击球
+    for shot in match_data.get('shots', []):
+        # 提取击球前的状态
+        pre_state = shot.get('pre_state', {})
+        balls_state = pre_state.get('balls', {})
+        player = shot.get('player', 0)
+        
+        # 将球的状态转换为特征向量
         state_feature = convert_balls_state_to_feature(balls_state)
         
-        # 计算胜率和预期剩余步数
-        current_player = shot['player']
-        shots_remaining = total_shots - shot_idx
+        # 计算价值标签（1表示当前玩家获胜，-1表示当前玩家失败）
+        if winner == player:
+            value = 1.0
+        else:
+            value = -1.0
         
-        # 胜率：1表示当前玩家最终获胜，0表示失败
-        win_rate = 1.0 if current_player == winner else 0.0
-        
-        # 预期剩余步数
-        expected_remaining_steps = shots_remaining
-        
-        # 记录价值数据
+        # 创建价值网络训练数据记录
         value_record = {
-            'state': state_feature.tolist(),
-            'win_rate': win_rate,
-            'expected_remaining_steps': expected_remaining_steps,
-            'match_filename': match_data.get('filename', 'unknown'),
-            'shot_index': shot.get('hit_count', 0)
+            'state': state_feature,
+            'value': value
         }
         
         value_records.append(value_record)
@@ -232,13 +199,15 @@ def process_single_match_for_value(match_data, output_file, is_first_match=False
     
     return len(value_records)
 
-def process_match_data(match_dir, behavior_output_dir, value_output_dir):
+def process_match_data(match_dir, behavior_output_dir, value_output_dir, start_id=None, end_id=None):
     """处理对局数据并生成训练数据（逐局处理和实时保存）
     
     Args:
         match_dir: 对局数据目录
         behavior_output_dir: 行为网络数据输出目录
         value_output_dir: 价值网络数据输出目录
+        start_id: 起始ID，用于文件名标识
+        end_id: 结束ID，用于文件名标识
     
     Returns:
         tuple: (行为网络数据文件路径, 价值网络数据文件路径)
@@ -259,8 +228,14 @@ def process_match_data(match_dir, behavior_output_dir, value_output_dir):
     
     # 创建输出文件
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    behavior_file = os.path.join(behavior_output_dir, f"behavior_network_data_{timestamp}.json")
-    value_file = os.path.join(value_output_dir, f"value_network_data_{timestamp}.json")
+    
+    # 根据是否提供了ID范围生成不同的文件名
+    if start_id is not None and end_id is not None:
+        behavior_file = os.path.join(behavior_output_dir, f"behavior_network_data_{start_id}_{end_id}_{timestamp}.json")
+        value_file = os.path.join(value_output_dir, f"value_network_data_{start_id}_{end_id}_{timestamp}.json")
+    else:
+        behavior_file = os.path.join(behavior_output_dir, f"behavior_network_data_{timestamp}.json")
+        value_file = os.path.join(value_output_dir, f"value_network_data_{timestamp}.json")
     
     # 逐局处理数据（实时保存）
     total_behavior_records = 0
@@ -305,6 +280,8 @@ if __name__ == "__main__":
     parser.add_argument('--match_dir', type=str, default="match_data", help="对局数据目录")
     parser.add_argument('--behavior_output_dir', type=str, default="training_data/behavior", help="行为网络数据输出目录")
     parser.add_argument('--value_output_dir', type=str, default="training_data/value", help="价值网络数据输出目录")
+    parser.add_argument('--start_id', type=int, default=None, help="起始ID，用于文件名标识")
+    parser.add_argument('--end_id', type=int, default=None, help="结束ID，用于文件名标识")
     
     args = parser.parse_args()
     
@@ -312,7 +289,9 @@ if __name__ == "__main__":
     behavior_file, value_file = process_match_data(
         match_dir=args.match_dir,
         behavior_output_dir=args.behavior_output_dir,
-        value_output_dir=args.value_output_dir
+        value_output_dir=args.value_output_dir,
+        start_id=args.start_id,
+        end_id=args.end_id
     )
     
     print("\n处理完成：")
