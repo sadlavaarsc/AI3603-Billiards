@@ -44,13 +44,15 @@ def convert_balls_to_serializable(balls):
     result = {}
     for ball_id, ball in balls.items():
         if hasattr(ball, 'state'):
+            # 正确访问Ball对象的属性结构
+            # 根据poolenv.py的注释，位置信息在ball.state.rvw[0]中
             result[ball_id] = {
-                'x': float(ball.state.x),
-                'y': float(ball.state.y),
-                'z': float(ball.state.z),
-                'vx': float(ball.state.vx),
-                'vy': float(ball.state.vy),
-                'vz': float(ball.state.vz),
+                'x': float(ball.state.rvw[0][0]),  # x坐标
+                'y': float(ball.state.rvw[0][1]),  # y坐标
+                'z': float(ball.state.rvw[0][2]),  # z坐标
+                'vx': float(ball.state.rvw[1][0]),  # x速度
+                'vy': float(ball.state.rvw[1][1]),  # y速度
+                'vz': float(ball.state.rvw[1][2]),  # z速度
                 's': int(ball.state.s)  # 状态: 0=静止, 4=落袋
             }
     return result

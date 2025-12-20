@@ -5,29 +5,35 @@ import numpy as np
 from tqdm import tqdm
 from datetime import datetime
 
-def load_match_data(match_dir):
-    """加载指定目录下的所有对局数据
+def load_single_match_data(file_path):
+    """加载单个对局数据文件
+    
+    Args:
+        file_path: 对局数据文件路径
+    
+    Returns:
+        dict or None: 对局数据字典，如果加载失败则返回None
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            match_data = json.load(f)
+            match_data['filename'] = os.path.basename(file_path)  # 记录文件名
+            return match_data
+    except Exception as e:
+        print(f"加载文件 {os.path.basename(file_path)} 时出错: {e}")
+        return None
+
+def get_match_files(match_dir):
+    """获取指定目录下的所有对局数据文件
     
     Args:
         match_dir: 对局数据目录
     
     Returns:
-        list: 对局数据列表
+        list: 对局文件路径列表
     """
     match_files = [f for f in os.listdir(match_dir) if f.startswith('match_') and f.endswith('.json')]
-    match_data_list = []
-    
-    for match_file in tqdm(match_files, desc="加载对局数据"):
-        file_path = os.path.join(match_dir, match_file)
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                match_data = json.load(f)
-                match_data['filename'] = match_file  # 记录文件名
-                match_data_list.append(match_data)
-        except Exception as e:
-            print(f"加载文件 {match_file} 时出错: {e}")
-    
-    return match_data_list
+    return [os.path.join(match_dir, f) for f in match_files]
 
 def convert_balls_state_to_feature(balls_state):
     """将球的状态转换为神经网络的输入特征
@@ -81,115 +87,153 @@ def convert_balls_state_to_feature(balls_state):
     
     return feature
 
-def generate_behavior_network_data(match_data_list, output_dir):
-    """生成行为网络训练数据
+def process_single_match_for_behavior(match_data, output_file, is_first_match=False, is_last_match=False):
+    """处理单个对局数据并实时写入行为网络数据文件
     
     Args:
-        match_data_list: 对局数据列表
-        output_dir: 输出目录
+        match_data: 单个对局数据
+        output_file: 输出文件路径
+        is_first_match: 是否是第一个对局
+        is_last_match: 是否是最后一个对局
     
     Returns:
-        str: 生成的数据文件路径
+        int: 生成的行为网络数据条数
     """
-    os.makedirs(output_dir, exist_ok=True)
+    behavior_records = []
+    winner = match_data['metadata'].get('winner', 0)
     
-    behavior_data = []
-    
-    for match_data in tqdm(match_data_list, desc="生成行为网络数据"):
-        winner = match_data['metadata'].get('winner', 0)
-        
-        for shot in match_data.get('shots', []):
-            # 只记录获胜方的击球动作
-            if shot['player'] == winner:
-                # 转换特征
-                balls_state = shot['pre_state']['balls']
-                state_feature = convert_balls_state_to_feature(balls_state)
-                
-                # 获取动作参数
-                action = shot['action']
-                
-                # 记录行为数据
-                behavior_record = {
-                    'state': state_feature.tolist(),
-                    'action': {
-                        'V0': action.get('V0', 0.0),
-                        'phi': action.get('phi', 0.0),
-                        'theta': action.get('theta', 0.0),
-                        'a': action.get('a', 0.0),
-                        'b': action.get('b', 0.0)
-                    },
-                    'match_filename': match_data.get('filename', 'unknown'),
-                    'shot_index': shot.get('hit_count', 0)
-                }
-                
-                behavior_data.append(behavior_record)
-    
-    # 保存数据
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = os.path.join(output_dir, f"behavior_network_data_{timestamp}.json")
-    
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(behavior_data, f, indent=2, ensure_ascii=False)
-    
-    print(f"生成了 {len(behavior_data)} 条行为网络训练数据")
-    return output_file
-
-def generate_value_network_data(match_data_list, output_dir):
-    """生成价值网络训练数据
-    
-    Args:
-        match_data_list: 对局数据列表
-        output_dir: 输出目录
-    
-    Returns:
-        str: 生成的数据文件路径
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    
-    value_data = []
-    
-    for match_data in tqdm(match_data_list, desc="生成价值网络数据"):
-        winner = match_data['metadata'].get('winner', 0)
-        total_shots = len(match_data.get('shots', []))
-        
-        for shot_idx, shot in enumerate(match_data.get('shots', [])):
+    for shot in match_data.get('shots', []):
+        # 只记录获胜方的击球动作
+        if shot['player'] == winner:
             # 转换特征
             balls_state = shot['pre_state']['balls']
             state_feature = convert_balls_state_to_feature(balls_state)
             
-            # 计算胜率和预期剩余步数
-            current_player = shot['player']
-            shots_remaining = total_shots - shot_idx
+            # 获取动作参数
+            action = shot['action']
             
-            # 胜率：1表示当前玩家最终获胜，0表示失败
-            win_rate = 1.0 if current_player == winner else 0.0
-            
-            # 预期剩余步数
-            expected_remaining_steps = shots_remaining
-            
-            # 记录价值数据
-            value_record = {
+            # 记录行为数据
+            behavior_record = {
                 'state': state_feature.tolist(),
-                'win_rate': win_rate,
-                'expected_remaining_steps': expected_remaining_steps,
+                'action': {
+                    'V0': action.get('V0', 0.0),
+                    'phi': action.get('phi', 0.0),
+                    'theta': action.get('theta', 0.0),
+                    'a': action.get('a', 0.0),
+                    'b': action.get('b', 0.0)
+                },
                 'match_filename': match_data.get('filename', 'unknown'),
                 'shot_index': shot.get('hit_count', 0)
             }
             
-            value_data.append(value_record)
+            behavior_records.append(behavior_record)
     
-    # 保存数据
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = os.path.join(output_dir, f"value_network_data_{timestamp}.json")
+    try:
+        # 根据是否是第一个或最后一个对局，采用不同的写入方式
+        if is_first_match:
+            # 第一个对局，写入JSON数组开头和数据
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write('[')
+                if behavior_records:
+                    f.write(json.dumps(behavior_records[0], ensure_ascii=False))
+                    for record in behavior_records[1:]:
+                        f.write(',\n' + json.dumps(record, ensure_ascii=False))
+        elif behavior_records:
+            # 不是第一个对局，追加数据
+            with open(output_file, 'a', encoding='utf-8') as f:
+                # 先写入逗号分隔符
+                f.write(',\n')
+                # 写入第一条记录
+                f.write(json.dumps(behavior_records[0], ensure_ascii=False))
+                # 写入后续记录
+                for record in behavior_records[1:]:
+                    f.write(',\n' + json.dumps(record, ensure_ascii=False))
+        
+        # 如果是最后一个对局，写入JSON数组结束标记
+        if is_last_match:
+            with open(output_file, 'a', encoding='utf-8') as f:
+                f.write(']')
+                
+    except Exception as e:
+        print(f"保存行为数据出错: {e}")
     
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(value_data, f, indent=2, ensure_ascii=False)
+    return len(behavior_records)
+
+def process_single_match_for_value(match_data, output_file, is_first_match=False, is_last_match=False):
+    """处理单个对局数据并实时写入价值网络数据文件
     
-    print(f"生成了 {len(value_data)} 条价值网络训练数据")
-    return output_file
+    Args:
+        match_data: 单个对局数据
+        output_file: 输出文件路径
+        is_first_match: 是否是第一个对局
+        is_last_match: 是否是最后一个对局
+    
+    Returns:
+        int: 生成的价值网络数据条数
+    """
+    value_records = []
+    winner = match_data['metadata'].get('winner', 0)
+    total_shots = len(match_data.get('shots', []))
+    
+    for shot_idx, shot in enumerate(match_data.get('shots', [])):
+        # 转换特征
+        balls_state = shot['pre_state']['balls']
+        state_feature = convert_balls_state_to_feature(balls_state)
+        
+        # 计算胜率和预期剩余步数
+        current_player = shot['player']
+        shots_remaining = total_shots - shot_idx
+        
+        # 胜率：1表示当前玩家最终获胜，0表示失败
+        win_rate = 1.0 if current_player == winner else 0.0
+        
+        # 预期剩余步数
+        expected_remaining_steps = shots_remaining
+        
+        # 记录价值数据
+        value_record = {
+            'state': state_feature.tolist(),
+            'win_rate': win_rate,
+            'expected_remaining_steps': expected_remaining_steps,
+            'match_filename': match_data.get('filename', 'unknown'),
+            'shot_index': shot.get('hit_count', 0)
+        }
+        
+        value_records.append(value_record)
+    
+    try:
+        # 根据是否是第一个或最后一个对局，采用不同的写入方式
+        if is_first_match:
+            # 第一个对局，写入JSON数组开头和数据
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write('[')
+                if value_records:
+                    f.write(json.dumps(value_records[0], ensure_ascii=False))
+                    for record in value_records[1:]:
+                        f.write(',\n' + json.dumps(record, ensure_ascii=False))
+        elif value_records:
+            # 不是第一个对局，追加数据
+            with open(output_file, 'a', encoding='utf-8') as f:
+                # 先写入逗号分隔符
+                f.write(',\n')
+                # 写入第一条记录
+                f.write(json.dumps(value_records[0], ensure_ascii=False))
+                # 写入后续记录
+                for record in value_records[1:]:
+                    f.write(',\n' + json.dumps(record, ensure_ascii=False))
+        
+        # 如果是最后一个对局，写入JSON数组结束标记
+        if is_last_match:
+            with open(output_file, 'a', encoding='utf-8') as f:
+                f.write(']')
+                
+    except Exception as e:
+        print(f"保存价值数据出错: {e}")
+    
+    return len(value_records)
 
 def process_match_data(match_dir, behavior_output_dir, value_output_dir):
-    """处理对局数据并生成训练数据
+    """处理对局数据并生成训练数据（逐局处理和实时保存）
     
     Args:
         match_dir: 对局数据目录
@@ -199,19 +243,60 @@ def process_match_data(match_dir, behavior_output_dir, value_output_dir):
     Returns:
         tuple: (行为网络数据文件路径, 价值网络数据文件路径)
     """
-    # 加载对局数据
-    match_data_list = load_match_data(match_dir)
-    print(f"成功加载 {len(match_data_list)} 局比赛数据")
+    # 确保输出目录存在
+    os.makedirs(behavior_output_dir, exist_ok=True)
+    os.makedirs(value_output_dir, exist_ok=True)
     
-    if not match_data_list:
-        print("没有找到有效的对局数据，无法生成训练数据")
+    # 获取对局文件列表
+    match_files = get_match_files(match_dir)
+    total_files = len(match_files)
+    
+    if total_files == 0:
+        print("没有找到有效的对局数据文件，无法生成训练数据")
         return None, None
     
-    # 生成行为网络数据
-    behavior_file = generate_behavior_network_data(match_data_list, behavior_output_dir)
+    print(f"找到 {total_files} 个对局数据文件")
     
-    # 生成价值网络数据
-    value_file = generate_value_network_data(match_data_list, value_output_dir)
+    # 创建输出文件
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    behavior_file = os.path.join(behavior_output_dir, f"behavior_network_data_{timestamp}.json")
+    value_file = os.path.join(value_output_dir, f"value_network_data_{timestamp}.json")
+    
+    # 逐局处理数据（实时保存）
+    total_behavior_records = 0
+    total_value_records = 0
+    
+    # 设置打印频率，避免过于频繁的进度更新
+    print_frequency = max(1, total_files // 10)  # 最多打印10次详细进度
+    
+    for i, file_path in enumerate(tqdm(match_files, desc="逐局处理数据")):
+        filename = os.path.basename(file_path)
+        
+        # 每处理一定数量的文件或最后一个文件时显示详细进度
+        if i % print_frequency == 0 or i == total_files - 1:
+            print(f"处理进度: {i+1}/{total_files}，正在处理文件: {filename}")
+            print(f"已处理行为数据: {total_behavior_records} 条，已处理价值数据: {total_value_records} 条")
+        
+        # 加载单个对局数据
+        match_data = load_single_match_data(file_path)
+        if match_data is None:
+            continue
+        
+        # 判断是否是第一个或最后一个对局
+        is_first_match = (i == 0)
+        is_last_match = (i == total_files - 1)
+        
+        # 处理行为网络数据
+        behavior_count = process_single_match_for_behavior(match_data, behavior_file, is_first_match, is_last_match)
+        total_behavior_records += behavior_count
+        
+        # 处理价值网络数据
+        value_count = process_single_match_for_value(match_data, value_file, is_first_match, is_last_match)
+        total_value_records += value_count
+    
+    print(f"成功处理 {total_files} 局比赛数据")
+    print(f"生成了 {total_behavior_records} 条行为网络训练数据")
+    print(f"生成了 {total_value_records} 条价值网络训练数据")
     
     return behavior_file, value_file
 
