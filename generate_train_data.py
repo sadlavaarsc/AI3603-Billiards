@@ -27,7 +27,7 @@ def generate_data_pipeline(num_matches=10, match_dir="match_data",
                           value_dir="training_data/value",
                           enable_noise=True, max_hit_count=200,
                           skip_generation=False, skip_processing=False,
-                          verbose=False):
+                          verbose=False, start_id=None):
     """完整的数据生成流程
     
     Args:
@@ -40,6 +40,7 @@ def generate_data_pipeline(num_matches=10, match_dir="match_data",
         skip_generation: 是否跳过对局数据生成
         skip_processing: 是否跳过数据处理
         verbose: 是否打印详细信息
+        start_id: 起始ID，用于并行生成时避免文件冲突
     
     Returns:
         bool: 是否成功完成
@@ -58,6 +59,8 @@ def generate_data_pipeline(num_matches=10, match_dir="match_data",
     print(f"- 价值网络数据目录: {value_dir}")
     print(f"- 启用噪声: {enable_noise}")
     print(f"- 每局最大击球次数: {max_hit_count}")
+    if start_id is not None:
+        print(f"- 起始ID: {start_id}, 结束ID: {start_id + num_matches - 1}")
     print()
     
     # 1. 生成对局数据
@@ -76,6 +79,8 @@ def generate_data_pipeline(num_matches=10, match_dir="match_data",
             generate_args.append("--enable_noise")
         if verbose:
             generate_args.append("--verbose")
+        if start_id is not None:
+            generate_args.extend(["--start_id", str(start_id)])
         
         success = run_command(generate_args)
         if not success:
@@ -99,6 +104,11 @@ def generate_data_pipeline(num_matches=10, match_dir="match_data",
             "--behavior_output_dir", behavior_dir,
             "--value_output_dir", value_dir
         ]
+        
+        # 如果指定了start_id，也传递给process_match_data.py
+        if start_id is not None:
+            process_args.extend(["--start_id", str(start_id)])
+            process_args.extend(["--end_id", str(start_id + num_matches - 1)])
         
         success = run_command(process_args)
         if not success:
@@ -159,6 +169,8 @@ def main():
                       help="生成的对局数量 (默认: 10)")
     parser.add_argument('--test_mode', action='store_true', 
                       help="启用测试模式，使用少量数据快速测试")
+    parser.add_argument('--start_id', type=int, default=None, 
+                      help="起始ID，用于并行生成时避免文件冲突")
     
     # 目录设置参数
     parser.add_argument('--match_dir', type=str, default="match_data",
@@ -211,7 +223,8 @@ def main():
         max_hit_count=args.max_hit_count,
         skip_generation=args.skip_generation,
         skip_processing=args.skip_processing,
-        verbose=args.verbose
+        verbose=args.verbose,
+        start_id=args.start_id
     )
     
     if success:
