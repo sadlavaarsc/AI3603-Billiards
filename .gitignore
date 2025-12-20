@@ -3,8 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
-# Pooltool library
-pooltool/
+training_data/
+match_data/
+
 
 # C extensions
 *.so
