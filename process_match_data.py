@@ -14,11 +14,13 @@ from datetime import datetime
 def load_single_match_data(file_path):
     """加载单个对局数据文件"""
     try:
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 加载对局文件: {file_path}")
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 成功加载对局文件: {file_path}")
         return data
     except Exception as e:
-        print(f"加载对局数据文件 {file_path} 出错: {e}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 加载对局数据文件 {file_path} 出错: {e}")
         return None
 
 def get_match_files(match_dir):
@@ -30,8 +32,9 @@ def get_match_files(match_dir):
     Returns:
         list: [(文件路径, 文件ID), ...] 的列表，按ID排序
     """
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 开始扫描对局目录: {match_dir}")
     if not os.path.exists(match_dir):
-        print(f"警告: 对局数据目录 {match_dir} 不存在")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 警告: 对局数据目录 {match_dir} 不存在")
         return []
     
     # 获取所有以'match_'开头且以'.json'结尾的文件
@@ -49,13 +52,15 @@ def get_match_files(match_dir):
                 # 处理格式为match_timestamp.json的旧文件
                 elif filename.count('_') >= 2:
                     match_files.append((os.path.join(match_dir, filename), float('inf')))  # 旧文件给予无穷大ID
-            except:
+            except Exception as e:
                 # 如果无法提取ID，也添加到列表
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 无法从文件名 {filename} 提取ID: {e}")
                 match_files.append((os.path.join(match_dir, filename), float('inf')))
     
     # 按ID排序
     match_files.sort(key=lambda x: x[1])
     
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 扫描完成，共找到 {len(match_files)} 个对局文件")
     # 返回文件路径和ID的元组列表
     return match_files
 
@@ -162,8 +167,17 @@ def process_single_match_for_behavior(match_data, output_file, is_first_match=Fa
     # 保存历史状态
     history_states = []
     
+    # 获取对局ID
+    match_id = match_data.get('metadata', {}).get('match_id', 'unknown')
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 开始处理对局 {match_id} 的行为数据，包含历史回合数: {history_length}")
+    
+    # 获取击球总数
+    shots_count = len(match_data.get('shots', []))
+    
     # 遍历对局中的每一次击球
-    for shot in match_data.get('shots', []):
+    for i, shot in enumerate(match_data.get('shots', [])):
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 处理对局 {match_id} 的第 {i+1}/{shots_count} 次击球")
+        
         # 提取击球前的状态
         pre_state = shot.get('pre_state', {})
         balls_state = pre_state.get('balls', {})
@@ -198,6 +212,8 @@ def process_single_match_for_behavior(match_data, output_file, is_first_match=Fa
         behavior_records.append(behavior_record)
     
     try:
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 开始写入对局 {match_id} 的行为数据，共 {len(behavior_records)} 条记录")
+        
         # 根据是否是第一个或最后一个对局，采用不同的写入方式
         if is_first_match:
             # 第一个对局，写入JSON数组开头和数据
@@ -223,8 +239,10 @@ def process_single_match_for_behavior(match_data, output_file, is_first_match=Fa
             with open(output_file, 'a', encoding='utf-8') as f:
                 f.write(']')
                 
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 成功写入对局 {match_id} 的行为数据")
+                
     except Exception as e:
-        print(f"保存行为数据出错: {e}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 保存行为数据出错: {e}")
     
     return len(behavior_records)
 
@@ -245,6 +263,7 @@ def process_single_match_for_value(match_data, output_file, is_first_match=False
     # 获取对局结果
     metadata = match_data.get('metadata', {})
     winner = metadata.get('winner', 0)
+    match_id = metadata.get('match_id', 'unknown')
     
     # 初始化价值网络数据记录列表
     value_records = []
@@ -252,8 +271,15 @@ def process_single_match_for_value(match_data, output_file, is_first_match=False
     # 保存历史状态
     history_states = []
     
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 开始处理对局 {match_id} 的价值数据，获胜者: {winner}")
+    
+    # 获取击球总数
+    shots_count = len(match_data.get('shots', []))
+    
     # 遍历对局中的每一次击球
-    for shot in match_data.get('shots', []):
+    for i, shot in enumerate(match_data.get('shots', [])):
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 处理对局 {match_id} 的第 {i+1}/{shots_count} 次击球（价值计算）")
+        
         # 提取击球前的状态
         pre_state = shot.get('pre_state', {})
         balls_state = pre_state.get('balls', {})
@@ -286,6 +312,8 @@ def process_single_match_for_value(match_data, output_file, is_first_match=False
         value_records.append(value_record)
     
     try:
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 开始写入对局 {match_id} 的价值数据，共 {len(value_records)} 条记录")
+        
         # 根据是否是第一个或最后一个对局，采用不同的写入方式
         if is_first_match:
             # 第一个对局，写入JSON数组开头和数据
@@ -311,8 +339,10 @@ def process_single_match_for_value(match_data, output_file, is_first_match=False
             with open(output_file, 'a', encoding='utf-8') as f:
                 f.write(']')
                 
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 成功写入对局 {match_id} 的价值数据")
+                
     except Exception as e:
-        print(f"保存价值数据出错: {e}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 保存价值数据出错: {e}")
     
     return len(value_records)
 
@@ -327,7 +357,13 @@ def process_match_data(match_dir, behavior_output_dir, value_output_dir, start_i
         end_id: 结束对局ID
         history_length: 需要包含的历史回合数
     """
+    # 记录开始时间
+    start_time = datetime.now()
+    print(f"[{start_time.strftime('%Y-%m-%d %H:%M:%S')}] 开始处理对局数据")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 配置参数: match_dir={match_dir}, history_length={history_length}")
+    
     # 确保输出目录存在
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 检查并创建输出目录")
     os.makedirs(behavior_output_dir, exist_ok=True)
     os.makedirs(value_output_dir, exist_ok=True)
     
@@ -342,6 +378,7 @@ def process_match_data(match_dir, behavior_output_dir, value_output_dir, start_i
             if start_id <= file_id <= end_id:
                 filtered_files.append((file_path, file_id))
         match_files = filtered_files
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 根据ID范围筛选后，剩余 {len(match_files)} 个对局文件 (ID范围: {start_id}-{end_id})")
     
     # 生成输出文件名，包含起始和结束ID
     if start_id is not None and end_id is not None:
@@ -353,6 +390,9 @@ def process_match_data(match_dir, behavior_output_dir, value_output_dir, start_i
         behavior_output_file = os.path.join(behavior_output_dir, f'behavior_data_{timestamp}.json')
         value_output_file = os.path.join(value_output_dir, f'value_data_{timestamp}.json')
     
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 行为数据将保存至: {behavior_output_file}")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 价值数据将保存至: {value_output_file}")
+    
     # 初始化总记录数
     total_behavior_records = 0
     total_value_records = 0
@@ -362,9 +402,14 @@ def process_match_data(match_dir, behavior_output_dir, value_output_dir, start_i
         is_first_match = (i == 0)
         is_last_match = (i == len(match_files) - 1)
         
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 处理对局 {file_id} ({i+1}/{len(match_files)})")
+        
         try:
             # 加载对局数据
             match_data = load_single_match_data(file_path)
+            if match_data is None:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 跳过无效对局文件: {file_path}")
+                continue
             
             # 处理行为网络数据，传递history_length参数
             behavior_records = process_single_match_for_behavior(
@@ -379,14 +424,20 @@ def process_match_data(match_dir, behavior_output_dir, value_output_dir, start_i
             total_behavior_records += behavior_records
             total_value_records += value_records
             
-            print(f"处理对局 {file_id} 完成，生成行为记录 {behavior_records} 条，价值记录 {value_records} 条")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 处理对局 {file_id} 完成，生成行为记录 {behavior_records} 条，价值记录 {value_records} 条")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 当前累计: 行为记录 {total_behavior_records} 条，价值记录 {total_value_records} 条")
             
         except Exception as e:
-            print(f"处理对局 {file_id} 出错: {e}")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 处理对局 {file_id} 出错: {e}")
     
-    print(f"全部处理完成，共生成行为记录 {total_behavior_records} 条，价值记录 {total_value_records} 条")
-    print(f"行为数据保存至: {behavior_output_file}")
-    print(f"价值数据保存至: {value_output_file}")
+    # 记录结束时间
+    end_time = datetime.now()
+    duration = end_time - start_time
+    
+    print(f"[{end_time.strftime('%Y-%m-%d %H:%M:%S')}] 全部处理完成，总耗时: {duration}")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 共生成行为记录 {total_behavior_records} 条，价值记录 {total_value_records} 条")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 行为数据保存至: {behavior_output_file}")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 价值数据保存至: {value_output_file}")
 
 
 if __name__ == '__main__':
