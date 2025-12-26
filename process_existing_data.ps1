@@ -1,6 +1,26 @@
-# PowerShell脚本：并行处理已生成的对局数据
+﻿# PowerShell脚本：并行处理已生成的对局数据
 # 功能：使用多线程并行处理现有的对局数据，生成包含历史状态的训练数据
 # 默认使用连续三回合的结果（history_length=2）
+
+# ========== 关键修复：param块必须放在脚本最顶部（注释后、其他代码前） ==========
+# 解析命令行参数（必须放在最前面）
+param(
+    [string]$matchDir,
+    [string]$behaviorDir,
+    [string]$valueDir,
+    [int]$historyLength = 2,  # 默认使用连续三回合的结果（0表示仅当前回合，1表示当前+1个历史，2表示当前+2个历史）
+    [int]$parallelTasks = 4,  # 默认并行任务数
+    [switch]$verbose
+)
+
+# 获取脚本文件所在的绝对路径（核心修复：基于脚本位置解析相对路径）
+$scriptDir = $PSScriptRoot  # PowerShell内置变量，指向脚本所在目录
+Write-Output "脚本所在目录: $scriptDir"
+
+# 设置默认路径（基于脚本目录，而非当前工作目录）
+if (-not $matchDir) { $matchDir = Join-Path -Path $scriptDir -ChildPath "match_data" }
+if (-not $behaviorDir) { $behaviorDir = Join-Path -Path $scriptDir -ChildPath "training_data/behavior" }
+if (-not $valueDir) { $valueDir = Join-Path -Path $scriptDir -ChildPath "training_data/value" }
 
 # 设置UTF-8编码
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -11,24 +31,7 @@ Write-Output "=== 台球AI训练数据并行处理系统 ==="
 Write-Output "此脚本将并行处理已生成的对局数据，默认使用连续三回合的结果"
 Write-Output ""
 
-# 默认参数设置
-$defaultMatchDir = "./match_data"
-$defaultBehaviorDir = "./training_data/behavior"
-$defaultValueDir = "./training_data/value"
-$defaultHistoryLength = 2  # 默认使用连续三回合的结果（0表示仅当前回合，1表示当前+1个历史，2表示当前+2个历史）
-$defaultParallelTasks = 4  # 默认并行任务数
-
-# 解析命令行参数
-param(
-    [string]$matchDir = $defaultMatchDir,
-    [string]$behaviorDir = $defaultBehaviorDir,
-    [string]$valueDir = $defaultValueDir,
-    [int]$historyLength = $defaultHistoryLength,
-    [int]$parallelTasks = $defaultParallelTasks,
-    [switch]$verbose
-)
-
-# 确保路径为绝对路径
+# 确保路径为绝对路径（基于脚本目录解析）
 $matchDir = [System.IO.Path]::GetFullPath($matchDir)
 $behaviorDir = [System.IO.Path]::GetFullPath($behaviorDir)
 $valueDir = [System.IO.Path]::GetFullPath($valueDir)
@@ -44,6 +47,7 @@ Write-Output ""
 # 检查对局数据目录是否存在
 if (-not (Test-Path $matchDir -PathType Container)) {
     Write-Output "错误: 对局数据目录不存在: $matchDir"
+    Write-Output "提示：请确认 match_data 文件夹在脚本目录 [$scriptDir] 下，或通过 -matchDir 参数指定正确路径"
     exit 1
 }
 
@@ -61,7 +65,7 @@ $matchFiles = Get-ChildItem -Path $matchDir -Filter "match_*.json" |
 $totalMatches = $matchFiles.Count
 
 if ($totalMatches -eq 0) {
-    Write-Output "错误: 未找到任何对局数据文件"
+    Write-Output "错误: 未找到任何对局数据文件（目录：$matchDir）"
     exit 1
 }
 
@@ -85,7 +89,8 @@ $taskScriptBlock = {
         $Verbose
     )
     
-    Write-Output "任务 $TaskId 开始处理对局ID范围: $StartId - $EndId"
+    # 使用 ${变量名} 明确分隔变量，避免语法歧义
+    Write-Output "任务 ${TaskId} 开始处理对局ID范围: ${StartId} - ${EndId}"
     
     # 构建Python命令参数
     $pythonArgs = @(
@@ -102,25 +107,42 @@ $taskScriptBlock = {
         $pythonArgs += "--verbose"
     }
     
+    # 执行Python脚本（确保Python脚本路径基于任务目录）
+    $pythonScriptPath = Join-Path -Path $PWD.Path -ChildPath "process_match_data.py"
+    if (-not (Test-Path $pythonScriptPath)) {
+        Write-Output "任务 ${TaskId} 错误：未找到 process_match_data.py（路径：$pythonScriptPath）"
+        return $false
+    }
+    $pythonArgs[0] = $pythonScriptPath
+
     # 执行Python脚本
     $startTime = Get-Date
     try {
-        $process = Start-Process -FilePath "python" -ArgumentList $pythonArgs -NoNewWindow -PassThru -RedirectStandardOutput "./task_${TaskId}_output.log" -RedirectStandardError "./task_${TaskId}_error.log"
+        # 日志文件名中的 ${TaskId} 明确分隔，日志保存到脚本目录
+        $logDir = $MatchDir | Split-Path -Parent
+        $stdoutLog = Join-Path -Path $logDir -ChildPath "./task_${TaskId}_output.log"
+        $stderrLog = Join-Path -Path $logDir -ChildPath "./task_${TaskId}_error.log"
+        
+        $process = Start-Process -FilePath "python" -ArgumentList $pythonArgs -NoNewWindow -PassThru `
+            -RedirectStandardOutput $stdoutLog `
+            -RedirectStandardError $stderrLog
         $process.WaitForExit()
         
         $exitCode = $process.ExitCode
         $endTime = Get-Date
         $duration = ($endTime - $startTime).TotalSeconds
         
+        # ${TaskId} 明确分隔
         if ($exitCode -eq 0) {
-            Write-Output "任务 $TaskId 成功完成，耗时: $duration 秒"
+            Write-Output "任务 ${TaskId} 成功完成，耗时: $duration 秒"
             return $true
         } else {
-            Write-Output "任务 $TaskId 失败，退出码: $exitCode"
+            Write-Output "任务 ${TaskId} 失败，退出码: $exitCode"
             return $false
         }
     } catch {
-        Write-Output "任务 $TaskId 执行出错: $_"
+        # ${TaskId} 明确分隔
+        Write-Output "任务 ${TaskId} 执行出错: $_"
         return $false
     }
 }
@@ -150,7 +172,8 @@ for ($taskId = 1; $taskId -le $parallelTasks; $taskId++) {
     $task = Start-Job -ScriptBlock $taskScriptBlock -ArgumentList $matchDir, $behaviorDir, $valueDir, $startId, $endId, $historyLength, $taskId, $verbose
     $tasks += $task
     
-    Write-Output "启动任务 $taskId: 处理对局ID $startId - $endId"
+    # 使用 ${变量名} 明确分隔变量
+    Write-Output "启动任务 ${taskId}: 处理对局ID ${startId} - ${endId}"
 }
 
 # 监控任务进度
@@ -179,7 +202,8 @@ while (-not $allTasksCompleted) {
     }
     
     $totalCompleted = $successCount + $failCount
-    Write-Output "进度: $totalCompleted/$($tasks.Count) 任务完成 ($successCount 成功, $failCount 失败)"
+    # 使用 ${变量名} 明确分隔变量
+    Write-Output "进度: ${totalCompleted}/${tasks.Count} 任务完成 (${successCount} 成功, ${failCount} 失败)"
     
     # 检查是否所有任务都已完成
     if ($runningTasks.Count -eq 0) {
