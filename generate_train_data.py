@@ -12,7 +12,8 @@ def run_command(command, cwd=None):
         cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True
+        text=True,
+        encoding='utf-8'  # 添加明确的编码参数，避免Windows系统上的解码错误
     )
     
     if result.stdout:
