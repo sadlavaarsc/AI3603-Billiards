@@ -1,6 +1,11 @@
 import os
 import json
+import datetime
 import argparse
+import sys
+
+# 确保项目根目录在Python路径中
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 import time
 from tqdm import tqdm
@@ -17,9 +22,16 @@ def load_single_match_data(file_path):
         return None
 
 def get_match_files(match_dir):
-    """获取指定目录下的所有对局数据文件"""
+    """获取指定目录下的所有对局数据文件，并尝试从文件名提取ID
+    
+    Args:
+        match_dir: 对局数据目录
+        
+    Returns:
+        list: [(文件路径, 文件ID), ...] 的列表，按ID排序
+    """
     if not os.path.exists(match_dir):
-        print(f"对局数据目录不存在: {match_dir}")
+        print(f"警告: 对局数据目录 {match_dir} 不存在")
         return []
     
     # 获取所有以'match_'开头且以'.json'结尾的文件
@@ -44,39 +56,111 @@ def get_match_files(match_dir):
     # 按ID排序
     match_files.sort(key=lambda x: x[1])
     
-    # 只返回文件路径列表
-    return [file_path for file_path, _ in match_files]
+    # 返回文件路径和ID的元组列表
+    return match_files
 
-def convert_balls_state_to_feature(balls_state):
-    """将球的状态转换为特征向量"""
+def convert_balls_state_to_feature(balls_states, history_length=0):
+    """将球的状态转换为特征向量，支持历史回合状态
+    
+    Args:
+        balls_states: 球的状态列表或字典。如果是列表，则按时间顺序包含历史状态和当前状态
+                     如果是字典，则只包含当前状态
+        history_length: 需要包含的历史回合数
+        
+    Returns:
+        list: 合并后的特征向量
+    """
+    # 确保balls_states是列表格式
+    if isinstance(balls_states, dict):
+        # 如果传入的是单个状态字典，转换为只包含当前状态的列表
+        balls_states = [balls_states]
+    
     # 球的ID列表，包括白球(0)和1-15号球
     ball_ids = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     
+    # 初始化特征向量
     features = []
-    for ball_id in ball_ids:
-        ball = balls_state.get(str(ball_id), {})
-        # 获取球的位置信息，如果不存在则使用默认值
-        x = ball.get('x', 0.0)
-        y = ball.get('y', 0.0)
-        z = ball.get('z', 0.0)
+    
+    # 计算需要包含的历史状态数量
+    # 确保不超过history_length，并且不超过可用的历史状态数
+    available_history = len(balls_states) - 1  # 最后一个是当前状态
+    needed_history = min(history_length, available_history)
+    
+    # 如果历史状态不足，需要重复最早的状态来填充
+    states_to_include = []
+    
+    # 如果需要更多历史状态
+    if needed_history > 0:
+        # 计算需要重复的最早状态次数
+        if available_history == 0:
+            # 没有历史状态，重复当前状态
+            earliest_state = balls_states[0]
+            states_to_include = [earliest_state] * (history_length + 1)  # +1 包括当前状态
+        else:
+            # 从最早的可用状态开始
+            earliest_idx = 0
+            current_idx = len(balls_states) - 1
+            
+            # 添加历史状态
+            states_to_include = balls_states[earliest_idx:current_idx-needed_history+1:-1][::-1]  # 逆序获取然后反转回正序
+            
+            # 确保历史状态数量正确
+            if len(states_to_include) < needed_history:
+                # 如果还是不足，用最早的状态填充
+                earliest_state = balls_states[0]
+                missing = needed_history - len(states_to_include)
+                states_to_include = [earliest_state] * missing + states_to_include
+            
+            # 添加当前状态
+            states_to_include.append(balls_states[current_idx])
+    else:
+        # 只使用当前状态
+        states_to_include = [balls_states[-1]]
+    
+    # 为每个状态生成特征并合并
+    for state in states_to_include:
+        state_features = []
+        for ball_id in ball_ids:
+            ball = state.get(str(ball_id), {})
+            # 获取球的位置信息，如果不存在则使用默认值
+            x = ball.get('x', 0.0)
+            y = ball.get('y', 0.0)
+            z = ball.get('z', 0.0)
+            
+            # 获取球的速度信息
+            vx = ball.get('vx', 0.0)
+            vy = ball.get('vy', 0.0)
+            vz = ball.get('vz', 0.0)
+            
+            # 获取球的状态
+            s = ball.get('s', 0)
+            
+            # 将球的信息添加到特征向量中
+            state_features.extend([x, y, z, vx, vy, vz, s])
         
-        # 获取球的速度信息
-        vx = ball.get('vx', 0.0)
-        vy = ball.get('vy', 0.0)
-        vz = ball.get('vz', 0.0)
-        
-        # 获取球的状态
-        s = ball.get('s', 0)
-        
-        # 将球的信息添加到特征向量中
-        features.extend([x, y, z, vx, vy, vz, s])
+        # 将当前状态的特征添加到总特征向量
+        features.extend(state_features)
     
     return features
 
-def process_single_match_for_behavior(match_data, output_file, is_first_match=False, is_last_match=False):
-    """处理单个对局数据，生成行为网络训练数据"""
+def process_single_match_for_behavior(match_data, output_file, is_first_match=False, is_last_match=False, history_length=0):
+    """处理单个对局数据，生成行为网络训练数据，支持时序状态特征
+    
+    Args:
+        match_data: 对局数据
+        output_file: 输出文件路径
+        is_first_match: 是否是第一个对局
+        is_last_match: 是否是最后一个对局
+        history_length: 需要包含的历史回合数
+        
+    Returns:
+        int: 生成的行为网络数据记录数量
+    """
     # 初始化行为网络数据记录列表
     behavior_records = []
+    
+    # 保存历史状态
+    history_states = []
     
     # 遍历对局中的每一次击球
     for shot in match_data.get('shots', []):
@@ -84,8 +168,16 @@ def process_single_match_for_behavior(match_data, output_file, is_first_match=Fa
         pre_state = shot.get('pre_state', {})
         balls_state = pre_state.get('balls', {})
         
-        # 将球的状态转换为特征向量
-        state_feature = convert_balls_state_to_feature(balls_state)
+        # 将当前状态添加到历史状态中
+        history_states.append(balls_state)
+        
+        # 确保历史状态数量不超过需要的数量+1（当前状态）
+        # 只保留最近的history_length+1个状态
+        if len(history_states) > history_length + 1:
+            history_states = history_states[-(history_length + 1):]
+        
+        # 将球的状态转换为特征向量，包含历史状态
+        state_feature = convert_balls_state_to_feature(history_states, history_length)
         
         # 提取动作信息
         action = shot.get('action', {})
@@ -99,7 +191,8 @@ def process_single_match_for_behavior(match_data, output_file, is_first_match=Fa
                 'theta': action.get('theta', 0.0),
                 'a': action.get('a', 0.0),
                 'b': action.get('b', 0.0)
-            }
+            },
+            'history_length': history_length  # 记录使用的历史长度，便于后续处理
         }
         
         behavior_records.append(behavior_record)
@@ -135,14 +228,29 @@ def process_single_match_for_behavior(match_data, output_file, is_first_match=Fa
     
     return len(behavior_records)
 
-def process_single_match_for_value(match_data, output_file, is_first_match=False, is_last_match=False):
-    """处理单个对局数据，生成价值网络训练数据"""
+
+def process_single_match_for_value(match_data, output_file, is_first_match=False, is_last_match=False, history_length=0):
+    """处理单个对局数据，生成价值网络训练数据，支持时序状态特征
+    
+    Args:
+        match_data: 对局数据
+        output_file: 输出文件路径
+        is_first_match: 是否是第一个对局
+        is_last_match: 是否是最后一个对局
+        history_length: 需要包含的历史回合数
+        
+    Returns:
+        int: 生成的价值网络数据记录数量
+    """
     # 获取对局结果
     metadata = match_data.get('metadata', {})
     winner = metadata.get('winner', 0)
     
     # 初始化价值网络数据记录列表
     value_records = []
+    
+    # 保存历史状态
+    history_states = []
     
     # 遍历对局中的每一次击球
     for shot in match_data.get('shots', []):
@@ -151,8 +259,16 @@ def process_single_match_for_value(match_data, output_file, is_first_match=False
         balls_state = pre_state.get('balls', {})
         player = shot.get('player', 0)
         
-        # 将球的状态转换为特征向量
-        state_feature = convert_balls_state_to_feature(balls_state)
+        # 将当前状态添加到历史状态中
+        history_states.append(balls_state)
+        
+        # 确保历史状态数量不超过需要的数量+1（当前状态）
+        # 只保留最近的history_length+1个状态
+        if len(history_states) > history_length + 1:
+            history_states = history_states[-(history_length + 1):]
+        
+        # 将球的状态转换为特征向量，包含历史状态
+        state_feature = convert_balls_state_to_feature(history_states, history_length)
         
         # 计算价值标签（1表示当前玩家获胜，-1表示当前玩家失败）
         if winner == player:
@@ -163,7 +279,8 @@ def process_single_match_for_value(match_data, output_file, is_first_match=False
         # 创建价值网络训练数据记录
         value_record = {
             'state': state_feature,
-            'value': value
+            'value': value,
+            'history_length': history_length  # 记录使用的历史长度，便于后续处理
         }
         
         value_records.append(value_record)
@@ -199,18 +316,16 @@ def process_single_match_for_value(match_data, output_file, is_first_match=False
     
     return len(value_records)
 
-def process_match_data(match_dir, behavior_output_dir, value_output_dir, start_id=None, end_id=None):
-    """处理对局数据并生成训练数据（逐局处理和实时保存）
+def process_match_data(match_dir, behavior_output_dir, value_output_dir, start_id=None, end_id=None, history_length=0):
+    """处理多个对局数据，生成行为网络和价值网络的训练数据，支持时序状态特征
     
     Args:
         match_dir: 对局数据目录
         behavior_output_dir: 行为网络数据输出目录
         value_output_dir: 价值网络数据输出目录
-        start_id: 起始ID，用于文件名标识
-        end_id: 结束ID，用于文件名标识
-    
-    Returns:
-        tuple: (行为网络数据文件路径, 价值网络数据文件路径)
+        start_id: 起始对局ID
+        end_id: 结束对局ID
+        history_length: 需要包含的历史回合数
     """
     # 确保输出目录存在
     os.makedirs(behavior_output_dir, exist_ok=True)
@@ -218,82 +333,89 @@ def process_match_data(match_dir, behavior_output_dir, value_output_dir, start_i
     
     # 获取对局文件列表
     match_files = get_match_files(match_dir)
-    total_files = len(match_files)
     
-    if total_files == 0:
-        print("没有找到有效的对局数据文件，无法生成训练数据")
-        return None, None
-    
-    print(f"找到 {total_files} 个对局数据文件")
-    
-    # 创建输出文件
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # 根据是否提供了ID范围生成不同的文件名
+    # 如果指定了起始和结束ID，筛选文件
     if start_id is not None and end_id is not None:
-        behavior_file = os.path.join(behavior_output_dir, f"behavior_network_data_{start_id}_{end_id}_{timestamp}.json")
-        value_file = os.path.join(value_output_dir, f"value_network_data_{start_id}_{end_id}_{timestamp}.json")
-    else:
-        behavior_file = os.path.join(behavior_output_dir, f"behavior_network_data_{timestamp}.json")
-        value_file = os.path.join(value_output_dir, f"value_network_data_{timestamp}.json")
+        # 筛选ID在[start_id, end_id]范围内的文件
+        filtered_files = []
+        for file_path, file_id in match_files:
+            if start_id <= file_id <= end_id:
+                filtered_files.append((file_path, file_id))
+        match_files = filtered_files
     
-    # 逐局处理数据（实时保存）
+    # 生成输出文件名，包含起始和结束ID
+    if start_id is not None and end_id is not None:
+        behavior_output_file = os.path.join(behavior_output_dir, f'behavior_data_{start_id}_{end_id}.json')
+        value_output_file = os.path.join(value_output_dir, f'value_data_{start_id}_{end_id}.json')
+    else:
+        # 如果没有指定ID范围，使用时间戳作为文件名
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        behavior_output_file = os.path.join(behavior_output_dir, f'behavior_data_{timestamp}.json')
+        value_output_file = os.path.join(value_output_dir, f'value_data_{timestamp}.json')
+    
+    # 初始化总记录数
     total_behavior_records = 0
     total_value_records = 0
     
-    # 设置打印频率，避免过于频繁的进度更新
-    print_frequency = max(1, total_files // 10)  # 最多打印10次详细进度
-    
-    for i, file_path in enumerate(tqdm(match_files, desc="逐局处理数据")):
-        filename = os.path.basename(file_path)
-        
-        # 每处理一定数量的文件或最后一个文件时显示详细进度
-        if i % print_frequency == 0 or i == total_files - 1:
-            print(f"处理进度: {i+1}/{total_files}，正在处理文件: {filename}")
-            print(f"已处理行为数据: {total_behavior_records} 条，已处理价值数据: {total_value_records} 条")
-        
-        # 加载单个对局数据
-        match_data = load_single_match_data(file_path)
-        if match_data is None:
-            continue
-        
-        # 判断是否是第一个或最后一个对局
+    # 遍历对局文件
+    for i, (file_path, file_id) in enumerate(match_files):
         is_first_match = (i == 0)
-        is_last_match = (i == total_files - 1)
+        is_last_match = (i == len(match_files) - 1)
         
-        # 处理行为网络数据
-        behavior_count = process_single_match_for_behavior(match_data, behavior_file, is_first_match, is_last_match)
-        total_behavior_records += behavior_count
-        
-        # 处理价值网络数据
-        value_count = process_single_match_for_value(match_data, value_file, is_first_match, is_last_match)
-        total_value_records += value_count
+        try:
+            # 加载对局数据
+            match_data = load_single_match_data(file_path)
+            
+            # 处理行为网络数据，传递history_length参数
+            behavior_records = process_single_match_for_behavior(
+                match_data, behavior_output_file, is_first_match, is_last_match, history_length
+            )
+            
+            # 处理价值网络数据，传递history_length参数
+            value_records = process_single_match_for_value(
+                match_data, value_output_file, is_first_match, is_last_match, history_length
+            )
+            
+            total_behavior_records += behavior_records
+            total_value_records += value_records
+            
+            print(f"处理对局 {file_id} 完成，生成行为记录 {behavior_records} 条，价值记录 {value_records} 条")
+            
+        except Exception as e:
+            print(f"处理对局 {file_id} 出错: {e}")
     
-    print(f"成功处理 {total_files} 局比赛数据")
-    print(f"生成了 {total_behavior_records} 条行为网络训练数据")
-    print(f"生成了 {total_value_records} 条价值网络训练数据")
-    
-    return behavior_file, value_file
+    print(f"全部处理完成，共生成行为记录 {total_behavior_records} 条，价值记录 {total_value_records} 条")
+    print(f"行为数据保存至: {behavior_output_file}")
+    print(f"价值数据保存至: {value_output_file}")
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="处理台球AI对局数据并生成训练数据")
-    parser.add_argument('--match_dir', type=str, default="match_data", help="对局数据目录")
-    parser.add_argument('--behavior_output_dir', type=str, default="training_data/behavior", help="行为网络数据输出目录")
-    parser.add_argument('--value_output_dir', type=str, default="training_data/value", help="价值网络数据输出目录")
-    parser.add_argument('--start_id', type=int, default=None, help="起始ID，用于文件名标识")
-    parser.add_argument('--end_id', type=int, default=None, help="结束ID，用于文件名标识")
+
+if __name__ == '__main__':
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='处理台球对局数据，生成训练数据')
+    parser.add_argument('--match_dir', type=str, default='./matches', help='对局数据目录')
+    parser.add_argument('--behavior_output_dir', type=str, default='./behavior_data', help='行为网络数据输出目录')
+    parser.add_argument('--value_output_dir', type=str, default='./value_data', help='价值网络数据输出目录')
+    parser.add_argument('--start_id', type=int, help='起始对局ID')
+    parser.add_argument('--end_id', type=int, help='结束对局ID')
+    parser.add_argument('--history_length', type=int, default=0, help='需要包含的历史回合数，默认0表示只使用当前回合')
     
     args = parser.parse_args()
     
-    # 处理数据
-    behavior_file, value_file = process_match_data(
-        match_dir=args.match_dir,
-        behavior_output_dir=args.behavior_output_dir,
-        value_output_dir=args.value_output_dir,
-        start_id=args.start_id,
-        end_id=args.end_id
-    )
+    # 验证参数
+    if args.start_id is not None and args.end_id is None:
+        parser.error('--start_id需要与--end_id一起使用')
+    if args.start_id is None and args.end_id is not None:
+        parser.error('--end_id需要与--start_id一起使用')
+    if args.history_length < 0:
+        parser.error('--history_length不能为负数')
     
-    print("\n处理完成：")
-    print(f"行为网络训练数据: {behavior_file}")
-    print(f"价值网络训练数据: {value_file}")
+    # 处理数据
+    process_match_data(
+        args.match_dir,
+        args.behavior_output_dir,
+        args.value_output_dir,
+        args.start_id,
+        args.end_id,
+        args.history_length
+    )
