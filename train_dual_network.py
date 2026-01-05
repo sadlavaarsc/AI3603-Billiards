@@ -5,6 +5,8 @@ import numpy as np
 from tqdm import tqdm
 import os
 from dual_network import DualNetwork
+# 导入data_loader.py中的数据加载功能
+from data_loader import create_dataloader, generate_sample_data, StatePreprocessor
 
 
 class DualNetworkTrainer:
@@ -180,59 +182,36 @@ class DualNetworkTrainer:
         }
 
 
-def create_dataloader(data, batch_size=32, shuffle=True):
-    """
-    创建数据加载器
-    
-    参数：
-        data: 包含states, policy_targets, value_targets的字典
-        batch_size: 批次大小
-        shuffle: 是否打乱数据
-    """
-    # 转换为numpy数组
-    states = np.array(data['states'])
-    policy_targets = np.array(data['policy_targets'])
-    value_targets = np.array(data['value_targets'])
-    
-    # 创建索引
-    indices = np.arange(len(states))
-    if shuffle:
-        np.random.shuffle(indices)
-    
-    # 批次生成器
-    def batch_generator():
-        for i in range(0, len(indices), batch_size):
-            batch_indices = indices[i:i+batch_size]
-            yield (
-                states[batch_indices],
-                policy_targets[batch_indices],
-                value_targets[batch_indices]
-            )
-    
-    # 返回生成器和长度
-    return batch_generator(), len(range(0, len(indices), batch_size))
-
-
 # 示例使用代码
 if __name__ == "__main__":
-    # 创建示例数据
-    batch_size = 32
-    example_states = np.random.rand(batch_size, 3, 81)  # 3局×81维
-    example_policy_targets = np.random.rand(batch_size, 5)  # 5维动作
-    example_value_targets = np.random.randint(0, 2, (batch_size, 1))  # 0或1
+    # 生成样本数据
+    print("Generating sample data...")
+    generate_sample_data('sample_data', num_samples=100)
     
-    # 创建数据加载器
-    data = {
-        'states': [example_states[0]],  # 示例数据
-        'policy_targets': [example_policy_targets[0]],
-        'value_targets': [example_value_targets[0]]
-    }
-    train_loader, _ = create_dataloader(data, batch_size=1)
+    # 创建预处理器
+    preprocessor = StatePreprocessor()
+    
+    # 使用data_loader.py中的create_combined_dataset函数创建组合数据集
+    from data_loader import create_combined_dataset
+    combined_data = create_combined_dataset(
+        'sample_data/behavior',
+        'sample_data/value'
+    )
+    
+    # 使用标准的create_dataloader函数创建数据加载器
+    batch_size = 32
+    train_loader = create_dataloader(
+        combined_data, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        preprocessor=preprocessor
+    )
     
     # 创建训练器
+    print("Creating trainer...")
     trainer = DualNetworkTrainer()
     
-    # 训练模型（仅作演示）
-    print("Starting training (demo mode)...")
-    trainer.train(train_loader, epochs=1, save_path='models/dual_network_demo.pt')
-    print("Training completed (demo mode)")
+    # 训练模型
+    print("Starting training...")
+    trainer.train(train_loader, epochs=5, save_path='models/dual_network_demo.pt')
+    print("Training completed")
