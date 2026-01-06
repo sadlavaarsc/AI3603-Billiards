@@ -16,7 +16,7 @@ evaluate.py - Agent 评估脚本
 from utils import set_random_seed
 from poolenv import PoolEnv
 from agent import BasicAgent
-from train import PPOAgent
+from train_ppo import PPOAgent
 
 # 设置随机种子，enable=True 时使用固定种子，enable=False 时使用完全随机
 # 根据需求，我们在这里统一设置随机种子，确保 agent 双方的全局击球扰动使用相同的随机状态
