@@ -72,7 +72,7 @@ def convert_to_81d_state(balls, my_targets):
     return state.tolist()
 
 def process_single_match(match_file):
-    """处理单个对局数据文件，生成可训练数据"""
+    """处理单个对局数据文件，生成可训练数据（生成器模式）"""
     # 加载对局数据
     with open(match_file, 'r', encoding='utf-8') as f:
         match_data = json.load(f)
@@ -80,12 +80,12 @@ def process_single_match(match_file):
     # 获取对局结果
     winner = match_data['metadata']['winner']
     
-    # 初始化训练数据列表
-    train_data = []
-    
     # 获取所有shots
     shots = match_data['shots']
     num_shots = len(shots)
+    
+    # 只保留最近2个状态，而不是所有历史状态
+    recent_states = []
     
     # 遍历每个shot，生成训练数据
     for i in range(num_shots):
@@ -96,30 +96,24 @@ def process_single_match(match_file):
         my_targets = pre_state['my_targets']
         action = shot['action']
         
-        # 转换当前状态为81维向量
+        # 转换当前状态为81d向量
         current_state = convert_to_81d_state(balls, my_targets)
         
-        # 获取前2个状态，如果不足则重复当前状态
-        state_1 = current_state  # 当前状态
-        state_2 = current_state  # 默认使用当前状态
-        state_3 = current_state  # 默认使用当前状态
-        
-        if i >= 1:
-            # 如果有前一个状态，使用前一个状态
-            prev_shot = shots[i-1]
-            prev_balls = prev_shot['pre_state']['balls']
-            prev_targets = prev_shot['pre_state']['my_targets']
-            state_2 = convert_to_81d_state(prev_balls, prev_targets)
-        
-        if i >= 2:
-            # 如果有前两个状态，使用前两个状态
-            prev_prev_shot = shots[i-2]
-            prev_prev_balls = prev_prev_shot['pre_state']['balls']
-            prev_prev_targets = prev_prev_shot['pre_state']['my_targets']
-            state_3 = convert_to_81d_state(prev_prev_balls, prev_prev_targets)
+        # 更新最近状态列表
+        recent_states.append(current_state)
+        # 只保留最近2个状态
+        if len(recent_states) > 2:
+            recent_states.pop(0)
         
         # 组合成连续3局的状态向量 [3, 81]
-        states = [state_3, state_2, state_1]
+        # - state_3: 最旧的状态（i-2，如果存在）
+        # - state_2: 中间的状态（i-1，如果存在）
+        # - state_1: 当前状态（i）
+        states = [
+            recent_states[0] if i >= 2 else current_state,  # state_3
+            recent_states[-1] if i >= 1 else current_state,  # state_2
+            current_state  # state_1
+        ]
         
         # 提取动作向量 [V0, phi, theta, a, b]
         action_vector = [
@@ -142,30 +136,53 @@ def process_single_match(match_file):
             "history_length": 3
         }
         
-        train_data.append(train_sample)
+        # 使用yield返回样本，而不是存储在列表中
+        yield train_sample
+        
+        # 每处理100个样本，清理一下内存
+        if i % 100 == 0:
+            import gc
+            gc.collect()
     
-    return train_data
+    # 清理内存
+    del match_data, shots
+    import gc
+    gc.collect()
 
 def process_match_data(match_dir, output_file):
-    """处理多个对局数据文件，生成可训练数据"""
+    """处理多个对局数据文件，生成可训练数据（流式处理）"""
     # 获取所有对局数据文件
     match_files = load_match_files(match_dir)
     
-    # 初始化总训练数据列表
-    all_train_data = []
+    total_samples = 0
+    first_sample = True
     
-    # 遍历每个对局数据文件
-    for match_file in tqdm(match_files, desc="Processing match files"):
-        # 处理单个对局数据
-        train_data = process_single_match(match_file)
-        # 添加到总训练数据列表
-        all_train_data.extend(train_data)
-    
-    # 保存为JSON文件
+    # 打开输出文件，开始写入JSON数组
     with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(all_train_data, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+        # 写入JSON数组开始
+        f.write('[\n')
+        
+        # 遍历每个对局数据文件
+        for match_file in tqdm(match_files, desc="Processing match files"):
+            # 处理单个对局数据 - 现在返回的是生成器
+            train_data_generator = process_single_match(match_file)
+            
+            # 逐个写入样本到文件
+            for sample in train_data_generator:
+                if not first_sample:
+                    # 不是第一个样本，先写入逗号分隔符
+                    f.write(',\n')
+                else:
+                    first_sample = False
+                
+                # 写入单个样本
+                json.dump(sample, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+                total_samples += 1
+        
+        # 写入JSON数组结束
+        f.write('\n]')
     
-    print(f"Generated {len(all_train_data)} training samples")
+    print(f"Generated {total_samples} training samples")
     print(f"Saved to {output_file}")
 
 def main():
