@@ -19,12 +19,14 @@ class NumpyEncoder(json.JSONEncoder):
         return super(NumpyEncoder, self).default(obj)
 
 def load_match_files(match_dir):
-    """加载指定目录下的所有对局数据文件"""
+    """加载指定目录下的所有对局数据文件，包括子目录"""
     match_files = []
-    for filename in os.listdir(match_dir):
-        if filename.startswith('match_') and filename.endswith('.json'):
-            file_path = os.path.join(match_dir, filename)
-            match_files.append(file_path)
+    # 递归遍历所有子目录
+    for root, dirs, files in os.walk(match_dir):
+        for filename in files:
+            if filename.startswith('match_') and filename.endswith('.json'):
+                file_path = os.path.join(root, filename)
+                match_files.append(file_path)
     return sorted(match_files)
 
 def convert_to_81d_state(balls, my_targets):
