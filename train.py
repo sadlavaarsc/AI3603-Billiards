@@ -1,303 +1,196 @@
+import os
+import json
+import argparse
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.optim as optim
-from torch.distributions import Normal
-import torch.nn.functional as F
-from poolenv import PoolEnv
-from agent import NewAgent
-import os
-import time
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-class ReplayBuffer:
-    """经验回放缓冲区"""
-    def __init__(self, buffer_size):
-        self.buffer_size = buffer_size
-        self.buffer = []
-        self.position = 0
-    
-    def add(self, state, action, reward, next_state, done):
-        """添加经验"""
-        if len(self.buffer) < self.buffer_size:
-            self.buffer.append(None)
-        self.buffer[self.position] = (state, action, reward, next_state, done)
-        self.position = (self.position + 1) % self.buffer_size
-    
-    def sample(self, batch_size):
-        """采样经验"""
-        batch = np.random.choice(len(self.buffer), batch_size, replace=False)
-        states, actions, rewards, next_states, dones = [], [], [], [], []
-        for idx in batch:
-            states.append(self.buffer[idx][0])
-            actions.append(self.buffer[idx][1])
-            rewards.append(self.buffer[idx][2])
-            next_states.append(self.buffer[idx][3])
-            dones.append(self.buffer[idx][4])
-        
-        # 转换为PyTorch张量
-        states = torch.tensor(np.array(states), dtype=torch.float32)
-        actions = torch.tensor(np.array(actions), dtype=torch.float32)
-        rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1)
-        next_states = torch.tensor(np.array(next_states), dtype=torch.float32)
-        dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1)
-        
-        return states, actions, rewards, next_states, dones
-    
-    def size(self):
-        """返回缓冲区大小"""
-        return len(self.buffer)
+# 导入现有模块
+from process_raw_match_data import process_match_data
+from dual_network import DualNetwork
+from data_loader import BilliardsDataset, StatePreprocessor
 
-class PPOAgent(NewAgent):
-    """基于PPO算法的强化学习智能体"""
-    def __init__(self, lr=1e-4, gamma=0.99, clip_epsilon=0.2, K_epochs=4, batch_size=64):
-        super().__init__()
-        # PPO参数
-        self.lr = lr
-        self.gamma = gamma
-        self.clip_epsilon = clip_epsilon
-        self.K_epochs = K_epochs
-        self.batch_size = batch_size
-        
-        # 优化器
-        self.optimizer = optim.Adam(self.net.parameters(), lr=lr)
-        
-        # 动作分布的标准差
-        self.log_std = torch.tensor([-0.5] * 5, requires_grad=True)
-        self.optimizer.add_param_group({'params': self.log_std})
-        
-        print("PPOAgent 已初始化。")
+def train(args):
+    """
+    训练双网络模型
+    """
+    # 1. 处理对局数据，生成训练数据
+    print(f"Processing match data from {args.match_dir}...")
+    process_match_data(args.match_dir, args.train_data_file)
+    print(f"Training data generated: {args.train_data_file}")
     
-    def get_action(self, state):
-        """获取动作和对数概率"""
-        state_tensor = torch.tensor(state).unsqueeze(0)
-        with torch.no_grad():
-            mean = self.net(state_tensor)[0]
-            std = torch.exp(self.log_std)
-            normal_dist = Normal(mean, std)
-            action = normal_dist.sample()
-            log_prob = normal_dist.log_prob(action).sum(dim=-1)
-            
-            # 确保动作在合法范围内
-            action = self._normalize_action(action.numpy())
-        
-        return action, log_prob.item()
+    # 2. 准备数据加载
+    print("Loading training data...")
     
-    def _normalize_action(self, action):
-        """将网络输出映射到合法的动作范围"""
-        normalized_action = np.zeros_like(action)
-        normalized_action[0] = F.sigmoid(torch.tensor(action[0])).item() * 7.5 + 0.5  # V0: 0.5-8.0
-        normalized_action[1] = F.sigmoid(torch.tensor(action[1])).item() * 360  # phi: 0-360
-        normalized_action[2] = F.sigmoid(torch.tensor(action[2])).item() * 90  # theta: 0-90
-        normalized_action[3] = torch.tanh(torch.tensor(action[3])).item() * 0.5  # a: -0.5-0.5
-        normalized_action[4] = torch.tanh(torch.tensor(action[4])).item() * 0.5  # b: -0.5-0.5
-        return normalized_action
+    # 创建状态预处理器
+    preprocessor = StatePreprocessor()
     
-    def evaluate(self, states, actions):
-        """评估动作的对数概率和值函数"""
-        mean = self.net(states)
-        std = torch.exp(self.log_std)
-        normal_dist = Normal(mean, std)
-        
-        # 计算对数概率
-        log_probs = normal_dist.log_prob(actions).sum(dim=-1, keepdim=True)
-        
-        # 计算熵（用于探索）
-        entropy = normal_dist.entropy().sum(dim=-1, keepdim=True)
-        
-        return log_probs, entropy
+    # 创建数据集（修改为支持单个文件）
+    # 首先将生成的训练数据文件移动到临时目录，然后使用该目录
+    temp_data_dir = os.path.join(os.path.dirname(args.train_data_file), 'temp_data')
+    os.makedirs(temp_data_dir, exist_ok=True)
+    temp_data_file = os.path.join(temp_data_dir, os.path.basename(args.train_data_file))
+    import shutil
+    shutil.copy(args.train_data_file, temp_data_file)
     
-    def update(self, replay_buffer):
-        """更新模型参数"""
-        if replay_buffer.size() < self.batch_size:
-            return
+    # 创建数据集并传递预处理器
+    dataset = BilliardsDataset(temp_data_dir, transform=preprocessor)
+    
+    # 创建数据加载器
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True if torch.cuda.is_available() else False
+    )
+    
+    print(f"Dataset size: {len(dataset)}")
+    print(f"Batch size: {args.batch_size}")
+    print(f"Number of batches: {len(dataloader)}")
+    
+    # 3. 初始化模型
+    print("Initializing dual network model...")
+    model = DualNetwork()
+    
+    # 检查CUDA可用性
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    print(f"Using device: {device}")
+    
+    # 4. 定义损失函数和优化器
+    # 策略损失：均方误差
+    policy_criterion = nn.MSELoss()
+    # 价值损失：均方误差
+    value_criterion = nn.MSELoss()
+    
+    # 优化器：Adam
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay
+    )
+    
+    # 学习率调度器
+    scheduler = optim.lr_scheduler.StepLR(
+        optimizer,
+        step_size=args.lr_step_size,
+        gamma=args.lr_gamma
+    )
+    
+    # 5. 训练循环
+    print("Starting training...")
+    
+    for epoch in range(args.epochs):
+        model.train()
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        total_loss = 0.0
         
-        for _ in range(self.K_epochs):
-            # 采样批次经验
-            states, actions, rewards, next_states, dones = replay_buffer.sample(self.batch_size)
-            
-            # 计算旧动作的对数概率
-            old_log_probs, _ = self.evaluate(states, actions)
-            
-            # 计算优势函数
-            with torch.no_grad():
-                # 计算TD目标
-                td_targets = rewards + self.gamma * (1 - dones) * self.net(next_states).mean(dim=-1, keepdim=True)
+        # 使用tqdm显示进度
+        with tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}") as pbar:
+            for batch_idx, (states, policy_targets, value_targets) in enumerate(pbar):
+                # 数据移到设备上
+                states = states.to(device)
+                policy_targets = policy_targets.to(device)
+                value_targets = value_targets.to(device)
                 
-                # 计算值函数估计
-                value_estimates = self.net(states).mean(dim=-1, keepdim=True)
+                # 前向传播
+                outputs = model(states)
+                policy_output = outputs['policy_output']
+                value_output = outputs['value_output']
                 
-                # 计算优势
-                advantages = td_targets - value_estimates
+                # 计算损失
+                policy_loss = policy_criterion(policy_output, policy_targets)
+                value_loss = value_criterion(value_output, value_targets)
                 
-                # 标准化优势
-                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-            
-            # 计算新动作的对数概率和熵
-            new_log_probs, entropy = self.evaluate(states, actions)
-            
-            # 计算概率比
-            ratio = torch.exp(new_log_probs - old_log_probs.detach())
-            
-            # 计算PPO损失
-            surrogate1 = ratio * advantages
-            surrogate2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages
-            actor_loss = -torch.min(surrogate1, surrogate2).mean()
-            
-            # 计算值函数损失
-            critic_loss = F.mse_loss(self.net(states).mean(dim=-1, keepdim=True), td_targets.detach())
-            
-            # 计算总损失
-            total_loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy.mean()
-            
-            # 更新模型
-            self.optimizer.zero_grad()
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
-            self.optimizer.step()
+                # 总损失：策略损失 + 价值损失
+                loss = policy_loss + value_loss
+                
+                # 反向传播和优化
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                
+                # 累积损失
+                total_policy_loss += policy_loss.item()
+                total_value_loss += value_loss.item()
+                total_loss += loss.item()
+                
+                # 更新进度条
+                pbar.set_postfix({
+                    'Policy Loss': f'{policy_loss.item():.6f}',
+                    'Value Loss': f'{value_loss.item():.6f}',
+                    'Total Loss': f'{loss.item():.6f}'
+                })
+        
+        # 学习率调度
+        scheduler.step()
+        
+        # 打印 epoch 结果
+        avg_policy_loss = total_policy_loss / len(dataloader)
+        avg_value_loss = total_value_loss / len(dataloader)
+        avg_total_loss = total_loss / len(dataloader)
+        
+        print(f"Epoch {epoch+1}/{args.epochs}:")
+        print(f"  Average Policy Loss: {avg_policy_loss:.6f}")
+        print(f"  Average Value Loss: {avg_value_loss:.6f}")
+        print(f"  Average Total Loss: {avg_total_loss:.6f}")
+        print(f"  Learning Rate: {optimizer.param_groups[0]['lr']}")
+        
+        # 保存模型检查点
+        if (epoch + 1) % args.save_interval == 0 or (epoch + 1) == args.epochs:
+            checkpoint_path = os.path.join(args.model_dir, f"dual_network_epoch_{epoch+1}.pt")
+            model.save(checkpoint_path)
+            print(f"Model checkpoint saved: {checkpoint_path}")
     
-    def save_model(self, path):
-        """保存模型"""
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save({
-            'model_state_dict': self.net.state_dict(),
-            'log_std': self.log_std,
-            'optimizer_state_dict': self.optimizer.state_dict()
-        }, path)
-        print(f"模型已保存到 {path}")
+    # 保存最终模型
+    final_model_path = os.path.join(args.model_dir, "dual_network_final.pt")
+    model.save(final_model_path)
+    print(f"Final model saved: {final_model_path}")
     
-    def load_model(self, path):
-        """加载模型"""
-        if os.path.exists(path):
-            checkpoint = torch.load(path)
-            self.net.load_state_dict(checkpoint['model_state_dict'])
-            self.log_std = checkpoint['log_std']
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            print(f"模型已从 {path} 加载")
-        else:
-            print(f"模型文件 {path} 不存在")
+    print("Training completed!")
 
-def train():
-    """训练主函数"""
-    # 环境和智能体初始化
-    env = PoolEnv(verbose=False)
-    agent = PPOAgent(lr=1e-4, gamma=0.99, clip_epsilon=0.2, K_epochs=4, batch_size=64)
+def main():
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description="Train dual network model using processed match data")
     
-    # 经验回放缓冲区
-    buffer_size = 10000
-    replay_buffer = ReplayBuffer(buffer_size)
+    # 数据相关参数
+    parser.add_argument('--match_dir', type=str, default='match_data',
+                        help='Directory containing match data files')
+    parser.add_argument('--train_data_file', type=str, default='trainable_data.json',
+                        help='Output file path for trainable data')
     
-    # 训练参数
-    num_episodes = 1000
-    max_steps_per_episode = 100
+    # 模型相关参数
+    parser.add_argument('--model_dir', type=str, default='models',
+                        help='Directory to save trained models')
+    
+    # 训练相关参数
+    parser.add_argument('--epochs', type=int, default=100,
+                        help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=64,
+                        help='Batch size for training')
+    parser.add_argument('--learning_rate', type=float, default=1e-4,
+                        help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=1e-5,
+                        help='Weight decay for regularization')
+    parser.add_argument('--lr_step_size', type=int, default=50,
+                        help='Step size for learning rate decay')
+    parser.add_argument('--lr_gamma', type=float, default=0.5,
+                        help='Gamma value for learning rate decay')
+    parser.add_argument('--save_interval', type=int, default=20,
+                        help='Interval for saving model checkpoints')
+    
+    args = parser.parse_args()
+    
+    # 创建必要的目录
+    os.makedirs(args.model_dir, exist_ok=True)
     
     # 开始训练
-    for episode in range(num_episodes):
-        # 重置环境，设置玩家A的目标球型为实心球(1-7)
-        env.reset(target_ball='solid')
-        state = env.get_observation('A')
-        
-        # 预处理状态
-        state_features = agent._preprocess_observation(state[0], state[1], state[2])
-        
-        episode_reward = 0
-        done = False
-        
-        for step in range(max_steps_per_episode):
-            # 获取动作
-            action, log_prob = agent.get_action(state_features)
-            
-            # 转换为环境可接受的动作格式
-            action_dict = {
-                'V0': action[0],
-                'phi': action[1],
-                'theta': action[2],
-                'a': action[3],
-                'b': action[4]
-            }
-            
-            # 执行动作（确保所有参数都是float64类型）
-            action_dict_float64 = {k: float(v) for k, v in action_dict.items()}
-            step_info = env.take_shot(action_dict_float64)
-            
-            # 检查是否结束
-            done, info = env.get_done()
-            
-            # 获取下一个状态
-            next_state = env.get_observation('A')
-            next_state_features = agent._preprocess_observation(next_state[0], next_state[1], next_state[2])
-            
-            # 计算奖励
-            reward = calculate_reward(step_info, done, info)
-            episode_reward += reward
-            
-            # 添加经验到回放缓冲区
-            replay_buffer.add(state_features, action, reward, next_state_features, done)
-            
-            # 更新状态
-            state_features = next_state_features
-            
-            if done:
-                break
-        
-        # 每局更新一次模型
-        agent.update(replay_buffer)
-        
-        # 打印训练信息
-        print(f"Episode: {episode+1}, Reward: {episode_reward:.2f}, Steps: {step+1}")
-        
-        # 每100局保存一次模型
-        if (episode + 1) % 100 == 0:
-            agent.save_model(f"./models/ppo_agent_{episode+1}.pt")
-    
-    # 训练结束后保存最终模型
-    agent.save_model("./models/ppo_agent_final.pt")
+    train(args)
 
-def calculate_reward(step_info, done, info):
-    """计算奖励，完全对齐台球规则"""
-    reward = 0
-    
-    # 1. 进球奖励
-    if 'ME_INTO_POCKET' in step_info and step_info['ME_INTO_POCKET']:
-        reward += len(step_info['ME_INTO_POCKET']) * 50
-    
-    # 2. 黑8进球奖励
-    if done and info['winner'] == 'A':
-        reward += 100  # 合法黑8进球奖励
-    
-    # 3. 对方进球惩罚
-    if 'ENEMY_INTO_POCKET' in step_info and step_info['ENEMY_INTO_POCKET']:
-        reward -= len(step_info['ENEMY_INTO_POCKET']) * 20
-    
-    # 4. 白球进袋惩罚
-    if 'FOUL_CUE_IN_POCKET' in step_info and step_info['FOUL_CUE_IN_POCKET']:
-        if 'ME_INTO_POCKET' in step_info and '8' in step_info['ME_INTO_POCKET']:
-            reward -= 150  # 白球+黑8同时进袋，严重犯规
-        else:
-            reward -= 100  # 白球进袋
-    
-    # 5. 非法黑8惩罚
-    if not done and 'ME_INTO_POCKET' in step_info and '8' in step_info['ME_INTO_POCKET']:
-        reward -= 150  # 清台前误打黑8，判负
-    
-    # 6. 其他犯规惩罚
-    if 'FOUL_FIRST_HIT' in step_info and step_info['FOUL_FIRST_HIT']:
-        reward -= 30  # 首球犯规
-    if 'FOUL_NO_RAIL' in step_info and step_info['FOUL_NO_RAIL']:
-        reward -= 30  # 碰库犯规
-    if 'FOUL_NO_HIT' in step_info and step_info['FOUL_NO_HIT']:
-        reward -= 30  # 未击中任何球
-    
-    # 7. 合法无进球小奖励
-    if reward == 0:
-        reward += 10  # 合法无进球
-    
-    # 8. 时间惩罚
-    reward -= 0.1
-    
-    return reward
-
-if __name__ == "__main__":
-    # 创建模型保存目录
-    os.makedirs("./models", exist_ok=True)
-    
-    # 开始训练
-    train()
+if __name__ == '__main__':
+    main()
