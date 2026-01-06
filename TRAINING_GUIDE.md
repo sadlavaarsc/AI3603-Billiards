@@ -43,27 +43,70 @@ pip install torch numpy tqdm
 
 #### 方法1：使用现有数据
 
-将已有的对局数据文件（以 `match_` 开头，`.json` 结尾）放入一个目录中，例如 `match_data`。
+将已有的对局数据文件（以 `match_` 开头，`.json` 结尾）放入一个目录中，例如 `match_data`。数据可以组织在子目录中，例如：
+
+```
+match_data/
+├── task_0/
+│   ├── match_1.json
+│   └── match_2.json
+├── task_1/
+│   └── match_3.json
+└── match_4.json
+```
 
 #### 方法2：生成模拟数据
 
 （注：目前 `generate_matches.py` 存在依赖问题，建议使用现有数据）
 
-## 5. 运行训练
+## 5. 数据处理
 
-### 5.1 基本命令
+### 5.1 使用 process_raw_match_data.py
+
+`process_raw_match_data.py` 用于将原始对局数据转换为模型可训练的数据格式。该脚本会递归遍历指定目录下的所有 `match_*.json` 文件，并将其转换为包含状态、动作和价值标签的训练数据。
+
+### 5.2 基本命令
+
+```bash
+python process_raw_match_data.py --match_dir <对局数据目录> --output_file <输出文件>
+```
+
+### 5.3 示例
+
+```bash
+python process_raw_match_data.py --match_dir match_data --output_file trainable_data.json
+```
+
+### 5.4 命令行参数说明
+
+| 参数名 | 类型 | 默认值 | 描述 |
+|--------|------|--------|------|
+| `--match_dir` | str | `match_data` | 对局数据目录，包含原始数据文件（支持子目录） |
+| `--output_file` | str | `trainable_data.json` | 处理后的训练数据输出文件 |
+
+### 5.5 数据处理过程
+
+1. **状态转换**：将每局的球状态转换为81维向量
+2. **历史状态拼接**：将连续3局的状态拼接成一个3×81的状态矩阵
+3. **动作提取**：提取5维动作向量
+4. **价值标签生成**：根据对局结果生成胜率标签
+5. **数据保存**：将处理后的数据保存为JSON格式
+
+## 6. 运行训练
+
+### 6.1 基本命令
 
 ```bash
 python train.py --match_dir <对局数据目录> --model_dir <模型保存目录>
 ```
 
-### 5.2 示例
+### 6.2 示例
 
 ```bash
 python train.py --match_dir match_data --model_dir models
 ```
 
-### 5.3 命令行参数说明
+### 6.3 命令行参数说明
 
 | 参数名 | 类型 | 默认值 | 描述 |
 |--------|------|--------|------|
@@ -78,7 +121,7 @@ python train.py --match_dir match_data --model_dir models
 | `--lr_gamma` | float | `0.5` | 学习率衰减因子 |
 | `--save_interval` | int | `20` | 模型检查点保存间隔 |
 
-## 6. 训练过程监控
+## 7. 训练过程监控
 
 训练过程中，脚本会输出以下信息：
 
@@ -97,7 +140,7 @@ python train.py --match_dir match_data --model_dir models
    - 最终模型保存路径
    - 训练完成提示
 
-## 7. 模型保存
+## 8. 模型保存
 
 训练过程中，模型会定期保存到指定的 `model_dir` 目录中：
 
@@ -109,7 +152,7 @@ python train.py --match_dir match_data --model_dir models
 - 策略网络头（PolicyHead）
 - 价值网络头（ValueHead）
 
-## 8. 训练结果示例
+## 9. 训练结果示例
 
 ```
 Processing match data from match_data...
@@ -135,7 +178,7 @@ Final model saved: models/dual_network_final.pt
 Training completed!
 ```
 
-## 9. 使用训练好的模型
+## 10. 使用训练好的模型
 
 训练好的模型可以用于：
 
@@ -143,7 +186,7 @@ Training completed!
 2. **胜率评估**：评估当前状态下的胜率
 3. **集成到台球AI系统**：用于实际游戏或模拟
 
-### 9.1 模型加载示例
+### 10.1 模型加载示例
 
 ```python
 from dual_network import DualNetwork
@@ -160,52 +203,52 @@ mapped_actions = outputs['mapped_actions']  # 映射到实际范围的动作
 value_output = outputs['value_output']  # 胜率预测
 ```
 
-## 10. 训练调优建议
+## 11. 训练调优建议
 
-### 10.1 超参数调优
+### 11.1 超参数调优
 
 - **学习率**：如果损失下降缓慢，尝试增大学习率；如果损失震荡，尝试减小学习率
 - **批次大小**：增大批次大小可以提高训练稳定性，但会增加内存占用
 - **训练轮数**：根据数据集大小调整，避免过拟合
 
-### 10.2 数据增强
+### 11.2 数据增强
 
 - 增加训练数据量可以提高模型泛化能力
 - 可以考虑对数据进行随机扰动或旋转
 
-### 10.3 模型结构调整
+### 11.3 模型结构调整
 
 - 可以尝试调整网络层数或隐藏层大小
 - 可以尝试不同的激活函数或正则化方法
 
-## 11. 常见问题
+## 12. 常见问题
 
-### 11.1 训练速度慢
+### 12.1 训练速度慢
 
 - 确保使用了CUDA加速（检查输出中是否显示 `Using device: cuda`）
 - 尝试增大批次大小
 - 减少模型复杂度
 
-### 11.2 损失不下降
+### 12.2 损失不下降
 
 - 检查学习率是否合适
 - 检查数据格式是否正确
 - 检查模型是否正确初始化
 
-### 11.3 内存不足
+### 12.3 内存不足
 
 - 减小批次大小
 - 减少模型复杂度
 - 使用更小的输入尺寸（如果可能）
 
-## 12. 注意事项
+## 13. 注意事项
 
 1. 训练数据质量对模型性能至关重要，请确保数据格式正确
 2. 建议定期保存模型检查点，以便在训练中断时恢复
 3. 训练完成后，建议在验证集上评估模型性能
 4. 可以尝试不同的超参数组合，找到最佳配置
 
-## 13. 联系与支持
+## 14. 联系与支持
 
 如有任何问题或建议，请联系项目维护者。
 
