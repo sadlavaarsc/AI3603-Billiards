@@ -240,8 +240,9 @@ class MCTS:
             '9', '10', '11', '12', '13', '14', '15'
         ]
 
-        TABLE_WIDTH = 2.845
-        TABLE_LENGTH = 1.4225
+        # 使用与process_raw_match_data.py和data_loader.py一致的标准尺寸
+        STANDARD_TABLE_WIDTH = 2.845
+        STANDARD_TABLE_LENGTH = 1.4225
         BALL_RADIUS = 0.0285
 
         for i, ball_id in enumerate(ball_order):
@@ -258,8 +259,9 @@ class MCTS:
                     state[base + 2] = -1.0
                     state[base + 3] = 1.0
                 else:
-                    state[base + 0] = pos[0] / TABLE_WIDTH
-                    state[base + 1] = pos[1] / TABLE_LENGTH
+                    # 球坐标使用标准尺寸进行归一化，与data_loader.py保持一致
+                    state[base + 0] = pos[0] / STANDARD_TABLE_WIDTH
+                    state[base + 1] = pos[1] / STANDARD_TABLE_LENGTH
                     state[base + 2] = pos[2] / (2 * BALL_RADIUS)
                     state[base + 3] = 0.0
             else:
@@ -268,13 +270,15 @@ class MCTS:
                 state[base + 2] = -1.0
                 state[base + 3] = 1.0
 
-        # 桌子尺寸（归一化）
+        # 球桌尺寸（64-65维）：与process_raw_match_data.py保持一致
+        # 直接使用实际尺寸，不进行归一化，由后续的StatePreprocessor处理
         if table is not None:
-            state[64] = table.width / TABLE_WIDTH
-            state[65] = table.length / TABLE_LENGTH
+            state[64] = table.w
+            state[65] = table.l
         else:
-            state[64] = 1.0
-            state[65] = 1.0
+            # 如果没有table对象，使用process_raw_match_data.py中的固定值
+            state[64] = 2.540
+            state[65] = 1.270
 
         # 目标球 one-hot
         if my_targets:
