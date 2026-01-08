@@ -15,7 +15,7 @@ evaluate.py - Agent 评估脚本
 # 导入必要的模块
 from utils import set_random_seed
 from poolenv import PoolEnv
-from agent import BasicAgent
+from agents import BasicAgent
 from train_ppo import PPOAgent
 
 # 设置随机种子，enable=True 时使用固定种子，enable=False 时使用完全随机

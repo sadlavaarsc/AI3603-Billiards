@@ -4,7 +4,7 @@ import torch.optim as optim
 from torch.distributions import Normal
 import torch.nn.functional as F
 from poolenv import PoolEnv
-from agent import NewAgent
+from agents import NewAgent
 import os
 import time
 

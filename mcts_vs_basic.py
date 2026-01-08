@@ -14,7 +14,7 @@ mcts_vs_basic.py - MCTS Agent 与 Basic Agent 对弈脚本
 # 导入必要的模块
 from utils import set_random_seed
 from poolenv import PoolEnv
-from agent import BasicAgent
+from agents import BasicAgent
 from MCTS import MCTS
 from dual_network import DualNetwork
 import collections

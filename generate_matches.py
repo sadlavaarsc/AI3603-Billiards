@@ -8,7 +8,7 @@ from datetime import datetime
 
 # 导入环境和Agent
 from poolenv import PoolEnv
-from agent import BasicAgent
+from agents import BasicAgent
 
 def save_match_data(match_data, output_dir, match_id=None):
     """保存单局比赛数据到文件"""
