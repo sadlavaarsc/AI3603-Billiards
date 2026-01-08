@@ -58,7 +58,8 @@ class MCTS:
         n_action_samples=8,
         c_puct=1.5,
         device="cuda" if torch.cuda.is_available() else "cpu",
-        debug=False
+        debug=False,
+        n_rollouts_per_action=3  # 每个action的模拟次数，默认3次
     ):
         self.model = model
         self.env = env
@@ -67,6 +68,7 @@ class MCTS:
         self.c_puct = c_puct
         self.device = device
         self.debug = debug
+        self.n_rollouts_per_action = n_rollouts_per_action  # 添加每个action的模拟次数参数
 
         self.PRIOR_THRESHOLD=0.02
         self.MAX_EXPAND=8
@@ -174,14 +176,20 @@ class MCTS:
         if done:
             return 1.0 if winner == root_player else 0.0
         
-        # 2. 网络评估
+        # 2. 网络评估 - 多次评估取均值
         state_tensor = self._state_seq_to_tensor(node.state_seq)
         state_tensor = state_tensor.unsqueeze(0).to(self.device) 
         
+        values = []
         with torch.no_grad():
-            out = self.model(state_tensor)
-            action_norm = out["policy_output"][0].cpu().numpy()
-            value = out["value_output"].item()
+            for _ in range(self.n_rollouts_per_action):
+                out = self.model(state_tensor)
+                if _ == 0:  # 只需要一次策略输出
+                    action_norm = out["policy_output"][0].cpu().numpy()
+                values.append(out["value_output"].item())
+        
+        # 取多次评估的均值作为最终value
+        value = np.mean(values)
 
         # 3. 反归一化得到真实物理动作
         base_action = self._denormalize_action(action_norm)
@@ -232,18 +240,26 @@ class MCTS:
             if action_key in node.children:
                 continue
 
-            # 使用_simulate_action直接模拟动作，不依赖env对象
-            sim_balls = poolenv.restore_balls_state(balls)
-            new_balls = self._simulate_action(sim_balls, table, action_key)
+            # 对每个action进行n_rollouts_per_action次模拟，取均值
+            state_vectors = []
             
-            # 生成新的状态向量
-            new_balls_state = poolenv.save_balls_state(new_balls)
-            new_state_vec = self._balls_state_to_81(
-                        new_balls_state,
-                        my_targets=None,
-                        table=None
-                    )
-            new_state_seq = node.state_seq[1:] + [new_state_vec]
+            for _ in range(self.n_rollouts_per_action):
+                # 使用_simulate_action直接模拟动作，不依赖env对象
+                sim_balls = poolenv.restore_balls_state(balls)
+                new_balls = self._simulate_action(sim_balls, table, action_key)
+                
+                # 生成新的状态向量
+                new_balls_state = poolenv.save_balls_state(new_balls)
+                new_state_vec = self._balls_state_to_81(
+                            new_balls_state,
+                            my_targets=None,
+                            table=None
+                        )
+                state_vectors.append(new_state_vec)
+            
+            # 取多次模拟的平均状态向量
+            avg_state_vec = np.mean(state_vectors, axis=0)
+            new_state_seq = node.state_seq[1:] + [avg_state_vec]
             
             # 创建子节点
             node.children[action_key] = MCTSNode(
