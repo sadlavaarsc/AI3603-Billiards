@@ -68,6 +68,12 @@ class MCTS:
         self.device = device
         self.debug = debug
 
+        # 添加噪声参数，与BasicAgentPro保持一致
+        # 定义噪声水平 (与 poolenv 保持一致或略大)
+        self.sim_noise = {
+            'V0': 0.1, 'phi': 0.15, 'theta': 0.1, 'a': 0.005, 'b': 0.005
+        }
+
         self.sampler = ActionSampler()
 
         # ===== 与训练代码完全一致的动作范围 =====
@@ -332,7 +338,7 @@ class MCTS:
 
     def _simulate_action(self, balls, table, action_key):
         """
-        直接模拟击球动作，不依赖环境对象
+        直接模拟击球动作，添加高斯噪声使模拟更真实
         
         参数：
             balls: 球状态字典，{ball_id: Ball对象}
@@ -358,13 +364,20 @@ class MCTS:
         cue = pt.Cue(cue_ball_id="cue")
         shot = pt.System(table=table, balls=balls, cue=cue)
         
-        # 设置球杆状态
+        # 添加高斯噪声，与BasicAgentPro保持一致
+        noisy_V0 = np.clip(action_dict["V0"] + np.random.normal(0, self.sim_noise['V0']), 0.5, 8.0)
+        noisy_phi = (action_dict["phi"] + np.random.normal(0, self.sim_noise['phi'])) % 360
+        noisy_theta = np.clip(action_dict["theta"] + np.random.normal(0, self.sim_noise['theta']), 0, 90)
+        noisy_a = np.clip(action_dict["a"] + np.random.normal(0, self.sim_noise['a']), -0.5, 0.5)
+        noisy_b = np.clip(action_dict["b"] + np.random.normal(0, self.sim_noise['b']), -0.5, 0.5)
+        
+        # 设置球杆状态，使用带噪声的动作
         cue.set_state(
-            V0=action_dict["V0"], 
-            phi=action_dict["phi"], 
-            theta=action_dict["theta"], 
-            a=action_dict["a"], 
-            b=action_dict["b"]
+            V0=noisy_V0, 
+            phi=noisy_phi, 
+            theta=noisy_theta, 
+            a=noisy_a, 
+            b=noisy_b
         )
         
         # 执行模拟
