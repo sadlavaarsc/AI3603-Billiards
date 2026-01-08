@@ -17,11 +17,23 @@ from poolenv import PoolEnv
 from agents import BasicAgent, MCTSAgent, DirectModelAgent
 from dual_network import DualNetwork
 import torch
+import sys
 
 # 设置随机种子，enable=True 时使用固定种子，enable=False 时使用完全随机
 set_random_seed(enable=False, seed=42)
 
 def main():
+
+    # 1. 保存原始的控制台输出（后续可恢复）
+    original_stdout = sys.stdout
+
+    # 2. 直接创建UTF-8编码的文件对象（核心：指定encoding='utf-8'）
+    # mode='w' 覆盖文件，mode='a' 追加内容（根据需求选）
+    #f = open('120_results.txt', 'w', encoding='utf-8', buffering=1)
+
+    # 3. 将print重定向到这个文件对象
+    #sys.stdout = f
+
     # 初始化环境和参数
     env = PoolEnv()
     results = {'AGENT_A_WIN': 0, 'AGENT_B_WIN': 0, 'SAME': 0}
@@ -113,6 +125,8 @@ def main():
         print("Basic Agent 获胜！")
     else:
         print("双方战平！")
+
+    #f.close()
 
 if __name__ == '__main__':
     main()
