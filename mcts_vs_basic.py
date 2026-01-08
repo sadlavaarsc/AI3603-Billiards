@@ -14,59 +14,12 @@ mcts_vs_basic.py - MCTS Agent 与 Basic Agent 对弈脚本
 # 导入必要的模块
 from utils import set_random_seed
 from poolenv import PoolEnv
-from agents import BasicAgent
-from MCTS import MCTS
+from agents import BasicAgent, MCTSAgent, DirectModelAgent
 from dual_network import DualNetwork
-import collections
 import torch
 
 # 设置随机种子，enable=True 时使用固定种子，enable=False 时使用完全随机
 set_random_seed(enable=False, seed=42)
-
-class MCTSAgent:
-    """基于 MCTS 的智能 Agent"""
-    
-    def __init__(self, model, env, n_simulations=30, n_action_samples=8, device="cuda" if torch.cuda.is_available() else "cpu"):
-        self.env = env
-        self.device = device
-        
-        self.mcts = MCTS(
-            model=model,
-            env=env,
-            n_simulations=n_simulations,
-            n_action_samples=n_action_samples,
-            device=device
-        )
-        self.state_buffer = collections.deque(maxlen=3)
-    
-    def decision(self, balls_state, my_targets=None, table=None):
-        """使用 MCTS 进行决策
-        
-        参数：
-            balls_state: 球状态字典
-            my_targets: 目标球ID列表
-            table: 球桌对象
-        
-        返回：
-            dict: 击球动作 {'V0', 'phi', 'theta', 'a', 'b'}
-        """
-        # 维护最近三杆
-        state_vec = self.mcts._balls_state_to_81(balls_state, my_targets, table)
-        if len(self.state_buffer) < 3:
-            self.state_buffer.append(state_vec)
-            while len(self.state_buffer) < 3:
-                self.state_buffer.append(state_vec)
-        else:
-            self.state_buffer.append(state_vec)
-        state_seq = list(self.state_buffer)
-        action = self.mcts.search(state_seq)
-        return {
-            "V0": float(action[0]),
-            "phi": float(action[1]),
-            "theta": float(action[2]),
-            "a": float(action[3]),
-            "b": float(action[4]),
-        }
 
 def main():
     # 初始化环境和参数
@@ -90,7 +43,7 @@ def main():
     
     # 初始化 Agent
     agent_a = BasicAgent()
-    agent_b = MCTSAgent(model, env, n_simulations=5, n_action_samples=8, device=device)
+    agent_b = MCTSAgent(model=model, env=env, n_simulations=5, n_action_samples=8, device=device)
     
     players = [agent_a, agent_b]  # 用于切换先后手
     target_ball_choice = ['solid', 'solid', 'stripe', 'stripe']  # 轮换球型
@@ -102,7 +55,7 @@ def main():
         env.reset(target_ball=target_ball_choice[i % 4])
         
         # 清空 MCTS Agent 的状态缓冲区
-        agent_b.state_buffer.clear()
+        agent_b.clear_buffer()
         
         player_class = players[i % 2].__class__.__name__
         ball_type = target_ball_choice[i % 4]
