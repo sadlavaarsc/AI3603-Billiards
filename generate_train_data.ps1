@@ -7,7 +7,7 @@
 
 # 核心配置：优先使用绝对路径
 $scriptWorkingDir = $PSScriptRoot  # 脚本所在目录的绝对路径
-$TOTAL_MATCHES = 10000
+$TOTAL_MATCHES = 2000
 $TOTAL_TASKS = 4  # 四并行
 $pythonScriptFileName = "generate_train_data.py"  # 你的Python脚本文件名
 $pythonScriptPath = Join-Path -Path $scriptWorkingDir -ChildPath $pythonScriptFileName
@@ -91,7 +91,8 @@ $taskScriptBlock = {
         "--value_dir", $valueDir,
         "--enable_noise",
         "--max_hit_count", 60,
-        "--verbose"
+        "--verbose",
+        "--skip_processing"
     )
 
     # 执行Python脚本并捕获结果

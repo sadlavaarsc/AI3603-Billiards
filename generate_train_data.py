@@ -147,7 +147,7 @@ def validate_environment():
     print("验证环境...")
     
     # 检查必要的文件是否存在
-    required_files = ["poolenv.py", "agent.py", "generate_matches.py", "process_match_data.py"]
+    required_files = ["poolenv.py", "generate_matches.py", "process_match_data.py"]
     missing_files = []
     
     for file in required_files:
