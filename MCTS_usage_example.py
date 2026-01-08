@@ -1,40 +1,43 @@
 # agents/alphazero_agent.py
 import MCTS
 import poolenv
-
-
+import collections
 class AlphaZeroAgent:
-    def __init__(self, model, env):
-        self.mcts = MCTS(model, env)
-        self.state_buffer = []
+    class AlphaZeroAgent:
+        def __init__(
+            self,
+            model,
+            env,
+            n_simulations=30,
+            n_action_samples=8,
+            device="cpu"
+        ):
+            self.env = env
 
-    def decision(self, balls_state):
+            self.mcts = MCTS(
+                model=model,
+                env=env,
+                n_simulations=n_simulations,
+                n_action_samples=n_action_samples,
+                device=device
+            )
+            self.state_buffer = collections.deque(maxlen=3)
+
+    def decision(self, balls_state, my_targets=None, table=None):
         # 维护最近三杆
-        self.state_buffer.append(balls_state)
+        state_vec = self.mcts._balls_state_to_81(balls_state, my_targets, table)
         if len(self.state_buffer) < 3:
-            self.state_buffer = [balls_state] * 3
+            self.state_buffer.append(state_vec)
+            while len(self.state_buffer) < 3:
+                self.state_buffer.append(state_vec)
         else:
-            self.state_buffer = self.state_buffer[-3:]
-
-        action = self.mcts.search(self.state_buffer)
+            self.state_buffer.append(state_vec)
+        state_seq = list(self.state_buffer)
+        action = self.mcts.search(state_seq)
         return {
-            "V0": action[0],
-            "phi": action[1],
-            "theta": action[2],
-            "a": action[3],
-            "b": action[4],
+            "V0": float(action[0]),
+            "phi": float(action[1]),
+            "theta": float(action[2]),
+            "a": float(action[3]),
+            "b": float(action[4]),
         }
-# example usage:
-env = PoolEnv()
-env.reset(target_ball="solid")
-
-agent = AlphaZeroAgent(model, env)
-
-while True:
-    balls_state = poolenv.save_balls_state(env.balls)
-    action = agent.decision(balls_state)
-    env.take_shot(action)
-
-    done, info = env.get_done()
-    if done:
-        break
