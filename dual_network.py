@@ -154,9 +154,18 @@ class DualNetwork(nn.Module):
     
     def load(self, path):
         """
-        加载模型权重
+        加载模型权重，支持两种格式：
+        1. 新格式（train.py保存）：包含'model_state_dict'键
+        2. 旧格式：直接包含'feature_extractor'、'policy_head'、'value_head'键
         """
         checkpoint = torch.load(path)
-        self.feature_extractor.load_state_dict(checkpoint['feature_extractor'])
-        self.policy_head.load_state_dict(checkpoint['policy_head'])
-        self.value_head.load_state_dict(checkpoint['value_head'])
+        
+        # 检查是否为新格式（包含model_state_dict）
+        if 'model_state_dict' in checkpoint:
+            # 使用新格式加载，直接调用load_state_dict加载整个模型
+            self.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            # 使用旧格式加载，分别加载各个组件
+            self.feature_extractor.load_state_dict(checkpoint['feature_extractor'])
+            self.policy_head.load_state_dict(checkpoint['policy_head'])
+            self.value_head.load_state_dict(checkpoint['value_head'])
