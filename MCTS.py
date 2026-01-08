@@ -89,6 +89,8 @@ class MCTS:
         for _ in range(self.n_simulations):
             node = root
             env_copy = copy.deepcopy(self.env)
+            # 确保搜索过程中不输出调试信息
+            env_copy.debug = False
 
             # -------- 1. Selection --------
             while node.children:

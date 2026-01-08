@@ -9,11 +9,12 @@ from data_loader import StatePreprocessor
 class MCTSAgent(Agent):
     """基于 MCTS 的智能 Agent"""
     
-    def __init__(self, model=None, env=None, n_simulations=30, n_action_samples=8, device="cuda" if torch.cuda.is_available() else "cpu"):
+    def __init__(self, model=None, env=None, n_simulations=30, n_action_samples=8, device="cuda" if torch.cuda.is_available() else "cpu", debug=True):
         super().__init__()
         self.env = env
         self.device = device
         self.model = model
+        self.debug = debug
         
         if model is not None and env is not None:
             self.mcts = MCTS(
@@ -21,7 +22,8 @@ class MCTSAgent(Agent):
                 env=env,
                 n_simulations=n_simulations,
                 n_action_samples=n_action_samples,
-                device=device
+                device=device,
+                debug=debug
             )
         else:
             self.mcts = None
@@ -39,7 +41,8 @@ class MCTSAgent(Agent):
                 env=env,
                 n_simulations=self.n_simulations,
                 n_action_samples=self.n_action_samples,
-                device=self.device
+                device=self.device,
+                debug=self.debug
             )
     
     def set_model(self, model):
@@ -51,7 +54,8 @@ class MCTSAgent(Agent):
                 env=self.env,
                 n_simulations=self.n_simulations,
                 n_action_samples=self.n_action_samples,
-                device=self.device
+                device=self.device,
+                debug=self.debug
             )
     
     def load_model(self, model_path):

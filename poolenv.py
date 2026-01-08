@@ -75,7 +75,7 @@ def restore_balls_state(saved_state):
 class PoolEnv():
     """台球对战环境"""
     
-    def __init__(self, debug=False):
+    def __init__(self, debug=True):
         """初始化环境（需调用 reset() 后才能使用）"""
         # 桌面和球
         self.table = None
