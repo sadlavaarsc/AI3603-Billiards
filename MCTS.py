@@ -68,6 +68,9 @@ class MCTS:
         self.device = device
         self.debug = debug
 
+        self.PRIOR_THRESHOLD=0.02
+        self.MAX_EXPAND=8
+
         # 添加噪声参数，与BasicAgentPro保持一致
         # 定义噪声水平 (与 poolenv 保持一致或略大)
         self.sim_noise = {
@@ -211,8 +214,20 @@ class MCTS:
             noise = np.random.dirichlet([0.3] * len(priors))
             priors = 0.75 * priors + 0.25 * noise
 
+        # Top-k
+        pairs = sorted(
+            zip(sampled_actions, priors),
+            key=lambda x: x[1],
+            reverse=True
+        )
+
         # 6. 创建子节点
-        for action, prior in zip(sampled_actions, priors):
+        for i, (action, prior) in enumerate(pairs):
+            if i >= self.MAX_EXPAND:
+                break
+            if prior < self.PRIOR_THRESHOLD:
+                continue
+
             action_key = self._action_to_key(action)
             if action_key in node.children:
                 continue

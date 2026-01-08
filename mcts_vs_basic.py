@@ -55,7 +55,7 @@ def main():
     
     # 初始化 Agent
     agent_a = BasicAgent()
-    agent_b = MCTSAgent(model=model, env=env, n_simulations=5, n_action_samples=8, device=device)
+    agent_b = MCTSAgent(model=model, env=env, n_simulations=10, n_action_samples=8, device=device)
     
     players = [agent_a, agent_b]  # 用于切换先后手
     target_ball_choice = ['solid', 'solid', 'stripe', 'stripe']  # 轮换球型
