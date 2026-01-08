@@ -19,6 +19,7 @@ from data_loader import BilliardsDataset, StatePreprocessor
 def train(args):
     """
     训练双网络模型（支持续训预训练模型，兼容嵌套模块权重格式）
+    新增功能：支持仅加载模型权重（不加载优化器/调度器状态），适配新数据训练
     核心修改：1.策略分支改为MSE损失 2.删除错误标签转换 3.策略标签即时归一化（不改动原始数据）
     """
     # 1. 处理对局数据
@@ -63,34 +64,32 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    # 记录初始Epoch（续训时从指定Epoch开始）
+    # 记录初始Epoch（续训时从指定Epoch开始，仅--resume_from生效）
     start_epoch = 1
     checkpoint = None
-    # 加载预训练模型
-    if args.resume_from:
-        if not os.path.exists(args.resume_from):
-            raise FileNotFoundError(f"预训练模型文件不存在: {args.resume_from}")
+
+    # 加载预训练模型/权重
+    if args.resume_from or args.load_weights_only:
+        # 统一校验文件存在性
+        weight_path = args.resume_from if args.resume_from else args.load_weights_only
+        if not os.path.exists(weight_path):
+            raise FileNotFoundError(f"指定的模型/权重文件不存在: {weight_path}")
 
         # 加载模型文件
-        checkpoint = torch.load(args.resume_from, map_location=device)
+        checkpoint = torch.load(weight_path, map_location=device)
         try:
-            # 尝试1：加载新格式（带model_state_dict）
+            # 提取模型权重（兼容新格式/旧格式）
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                model.load_state_dict(
-                    checkpoint['model_state_dict'], strict=False)
-                if 'epoch' in checkpoint:
-                    start_epoch = checkpoint['epoch'] + 1
-                print(
-                    f"✅ 加载新格式预训练模型: {args.resume_from}，从Epoch {start_epoch} 开始续训")
-            # 尝试2：加载旧格式（直接权重）
+                model_weights = checkpoint['model_state_dict']
             else:
-                # 适配嵌套模块的权重格式
-                model.load_state_dict(checkpoint, strict=False)
-                print(f"✅ 加载旧格式预训练模型: {args.resume_from}（兼容嵌套模块）")
+                model_weights = checkpoint  # 旧格式直接是权重
+
+            # 加载权重（strict=False兼容层名差异）
+            model.load_state_dict(model_weights, strict=False)
 
             # 打印权重加载情况，方便调试
-            missing_keys, unexpected_keys = model.load_state_dict(checkpoint['model_state_dict'] if (
-                isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint) else checkpoint, strict=False)
+            missing_keys, unexpected_keys = model.load_state_dict(
+                model_weights, strict=False)
             if missing_keys:
                 print(f"⚠️ 权重中缺失的键（可忽略）: {missing_keys[:5]}...")  # 只打印前5个避免刷屏
             if unexpected_keys:
@@ -100,7 +99,8 @@ def train(args):
             # 终极方案：手动遍历权重，匹配层名
             print(f"⚠️ 直接加载权重失败，尝试手动匹配: {str(e)}")
             model_dict = model.state_dict()
-            # 过滤出匹配的权重
+
+            # 提取模型权重（兼容新格式/旧格式）
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                 pretrained_dict = checkpoint['model_state_dict']
             else:
@@ -130,6 +130,16 @@ def train(args):
             model_dict.update(new_pretrained_dict)
             model.load_state_dict(model_dict)
             print("✅ 手动匹配权重成功，忽略层名不匹配的部分")
+
+        # 区分两种加载模式的提示
+        if args.resume_from and not args.load_weights_only:
+            # 续训模式：恢复Epoch和优化器状态
+            if 'epoch' in checkpoint:
+                start_epoch = checkpoint['epoch'] + 1
+            print(f"✅ 加载预训练模型（续训模式）: {weight_path}，从Epoch {start_epoch} 开始续训")
+        else:
+            # 仅加载权重模式：Epoch从1开始，不恢复优化器
+            print(f"✅ 仅加载模型权重（新训练模式）: {weight_path}，从Epoch 1 开始训练")
     else:
         print("🔄 初始化全新模型，从头开始训练")
 
@@ -140,30 +150,32 @@ def train(args):
     policy_criterion = nn.MSELoss()
     value_criterion = nn.MSELoss()
 
-    # 优化器
+    # 优化器（全新初始化，仅续训模式恢复状态）
     optimizer = optim.Adam(
         model.parameters(),
         lr=args.learning_rate,
         weight_decay=args.weight_decay
     )
 
-    # 学习率调度器
+    # 学习率调度器（全新初始化，仅续训模式恢复状态）
     scheduler = optim.lr_scheduler.StepLR(
         optimizer,
         step_size=args.lr_step_size,
         gamma=args.lr_gamma
     )
 
-    # 续训时恢复优化器和调度器状态（仅新格式支持）
-    if args.resume_from and checkpoint is not None and 'optimizer_state_dict' in checkpoint:
+    # 仅续训模式恢复优化器和调度器状态（--load_weights_only时跳过）
+    if args.resume_from and not args.load_weights_only and checkpoint is not None and 'optimizer_state_dict' in checkpoint:
         try:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            print("✅ 恢复优化器和学习率调度器状态")
+            print("✅ 恢复优化器和学习率调度器状态（续训模式）")
         except:
             print("⚠️ 无法恢复优化器/调度器状态，使用全新的优化器配置")
-    elif args.resume_from:
+    elif args.resume_from and not args.load_weights_only:
         print("⚠️ 旧格式模型文件无优化器状态，使用全新的优化器配置")
+    elif args.load_weights_only:
+        print("ℹ️ 仅加载权重模式，使用全新的优化器和调度器配置")
 
     # 5. 训练循环
     print(f"Starting training from Epoch {start_epoch}...")
@@ -277,7 +289,7 @@ def train(args):
 def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(
-        description="Train dual network model (support resume training)")
+        description="Train dual network model (support resume training / load weights only)")
 
     # 数据相关参数
     parser.add_argument('--match_dir', type=str, default='match_data',
@@ -292,6 +304,8 @@ def main():
                         help='Directory to save trained models')
     parser.add_argument('--resume_from', type=str, default='',
                         help='Path to pre-trained model (e.g., models/dual_network_epoch_100.pt) for resume training')
+    parser.add_argument('--load_weights_only', type=str, default='',
+                        help='Path to model file to load weights only (no optimizer/scheduler state, for new training with new data)')
 
     # 训练相关参数
     parser.add_argument('--epochs', type=int, default=100,
@@ -317,6 +331,10 @@ def main():
                         help='Max norm for gradient clipping (0 to disable)')
 
     args = parser.parse_args()
+
+    # 校验参数互斥性（--resume_from和--load_weights_only不能同时用）
+    if args.resume_from and args.load_weights_only:
+        raise ValueError("❌ --resume_from 和 --load_weights_only 不能同时使用！")
 
     # 创建必要的目录
     os.makedirs(args.model_dir, exist_ok=True)
