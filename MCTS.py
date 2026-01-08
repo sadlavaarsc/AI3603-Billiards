@@ -54,7 +54,7 @@ class MCTS:
         self,
         model,
         env,
-        n_simulations=20,
+        n_simulations=5,
         n_action_samples=8,
         c_puct=1.5,
         device="cuda" if torch.cuda.is_available() else "cpu"
@@ -142,9 +142,6 @@ class MCTS:
             winner = info.get("winner", None)
             return 1.0 if winner == root_player else 0.0
         
-        if node.children:
-            return node.Q
-           
         state_tensor = self._state_seq_to_tensor(node.state_seq)
         state_tensor = state_tensor.unsqueeze(0).to(self.device) 
         # -------- 网络评估 --------
@@ -180,19 +177,33 @@ class MCTS:
         similarities = 1.0 / (1.0 + distances)
         priors = similarities / np.sum(similarities)
 
+        if node.parent is None:
+            noise = np.random.dirichlet([0.3] * len(priors))
+            priors = 0.75 * priors + 0.25 * noise
+
         # -------- 创建子节点 --------
         for action, prior in zip(sampled_actions, priors):
             action_key = self._action_to_key(action)
             if action_key in node.children:
                 continue
 
-            new_state_seq = node.state_seq[1:] + [node.state_seq[-1]]
+            saved_state = poolenv.save_balls_state(env.balls)
+            self._apply_action(env, action_key)
+
+            new_balls = poolenv.save_balls_state(env.balls)
+            new_state_vec = self._balls_state_to_81(
+                        new_balls,
+                        my_targets=None,
+                        table=None
+                    )
+            new_state_seq = node.state_seq[1:] + [new_state_vec]
             node.children[action_key] = MCTSNode(
                 state_seq=new_state_seq,
                 parent=node,
                 prior=prior
             )
 
+            env.balls = poolenv.restore_balls_state(saved_state)
         return value
 
     def _backpropagate(self, node, value):
@@ -274,20 +285,19 @@ class MCTS:
         return state
 
     def _state_seq_to_tensor(self, state_seq):
-        """
-        state_seq: List[balls_state_dict], len=3
-        return: torch.FloatTensor [3, 81]
-        """
-        states = np.array(state_seq, dtype=np.float32)
+        if len(state_seq) != 3:
+            raise ValueError(f"state_seq length must be 3, got {len(state_seq)}")
 
-        if states.shape != (3, 81):
-            raise ValueError(
-                f"MCTS expects state shape (3, 81), got {states.shape}"
-            )
-        # 与训练完全一致的归一化
+        for i, s in enumerate(state_seq):
+            if not isinstance(s, np.ndarray) or s.shape != (81,):
+                raise TypeError(
+                    f"state_seq[{i}] must be np.ndarray(81), got {type(s)} {getattr(s, 'shape', None)}"
+                )
+
+        states = np.stack(state_seq, axis=0)   # ← 关键
         states = self.state_preprocessor(states)
-
         return torch.from_numpy(states).float()
+
 
 
     def _action_to_key(self, action):
