@@ -8,7 +8,7 @@ from datetime import datetime
 
 # 导入环境和Agent
 from poolenv import PoolEnv
-from agents import BasicAgent
+from agents import BasicAgentPro
 
 def save_match_data(match_data, output_dir, match_id=None):
     """保存单局比赛数据到文件"""
@@ -171,7 +171,7 @@ def generate_matches(num_matches, output_dir, enable_noise=True, max_hit_count=2
         list: 生成的文件路径列表
     """
     env = PoolEnv()
-    agent = BasicAgent()  # 使用贝叶斯AI进行自对弈
+    agent = BasicAgentPro()  # 使用贝叶斯优化版AI进行自对弈
     
     file_paths = []
     
