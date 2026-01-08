@@ -88,9 +88,15 @@ class MCTS:
 
         for _ in range(self.n_simulations):
             node = root
-            env_copy = copy.deepcopy(self.env)
-            # 确保搜索过程中不输出调试信息
-            env_copy.debug = False
+            
+            # 1. 保存当前球的状态，用于模拟
+            # 只保存必要的球状态，避免deepcopy整个环境
+            original_balls = poolenv.save_balls_state(self.env.balls)
+            
+            # 2. 复制当前环境的引用，而不是整个环境
+            # 我们只需要table和player_targets，这些是只读的
+            table = self.env.table
+            player_targets = self.env.player_targets
 
             # -------- 1. Selection --------
             while node.children:
@@ -111,10 +117,16 @@ class MCTS:
                 idx = np.random.choice(candidates)
 
                 action_key, node = items[idx]
-                self._apply_action(env_copy, action_key)
+                
+                # 使用save/restore机制替代deepcopy，优化性能
+                sim_balls = poolenv.restore_balls_state(original_balls)
+                
+                # 3. 执行动作，使用simulate_action方法直接模拟，不依赖环境
+                new_balls = self._simulate_action(sim_balls, table, action_key)
+                original_balls = poolenv.save_balls_state(new_balls)
 
             # -------- 2. Expansion + Evaluation --------
-            value = self._expand_and_evaluate(node, env_copy, root_player)
+            value = self._expand_and_evaluate(node, original_balls, table, player_targets, root_player)
 
             # -------- 3. Backpropagation --------
             self._backpropagate(node, value)
@@ -139,22 +151,30 @@ class MCTS:
     # 核心步骤
     # ------------------------------------------------------------------
 
-    def _expand_and_evaluate(self, node, env, root_player):
+    def _expand_and_evaluate(self, node, balls, table, player_targets, root_player):
         
-        done, info = env.get_done()
+        # 1. 检查游戏是否结束（简化版，只检查黑八是否进袋）
+        done = False
+        winner = None
+        for ball_id, ball in balls.items():
+            if ball_id == '8' and ball.state.s == 4:
+                done = True
+                winner = root_player
+                break
+        
         if done:
-            winner = info.get("winner", None)
             return 1.0 if winner == root_player else 0.0
         
+        # 2. 网络评估
         state_tensor = self._state_seq_to_tensor(node.state_seq)
         state_tensor = state_tensor.unsqueeze(0).to(self.device) 
-        # -------- 网络评估 --------
+        
         with torch.no_grad():
             out = self.model(state_tensor)
             action_norm = out["policy_output"][0].cpu().numpy()
             value = out["value_output"].item()
 
-        # 反归一化得到真实物理动作
+        # 3. 反归一化得到真实物理动作
         base_action = self._denormalize_action(action_norm)
 
         if node.parent is None and self.debug:
@@ -162,8 +182,7 @@ class MCTS:
             print("value:", value)         # 调试信息
             print("base_action:", base_action)  # 调试信息
         
-
-        # -------- 连续动作采样 --------
+        # 4. 连续动作采样
         sampled_action_norms = self.sampler.sample(
             action_norm,
             self.n_action_samples
@@ -173,7 +192,8 @@ class MCTS:
             self._denormalize_action(a_norm)
             for a_norm in sampled_action_norms
         ]
-        # 基于相似度构造先验
+        
+        # 5. 基于相似度构造先验
         distances = np.array(
             [np.linalg.norm(a - base_action) for a in sampled_actions],
             dtype=np.float32
@@ -185,29 +205,31 @@ class MCTS:
             noise = np.random.dirichlet([0.3] * len(priors))
             priors = 0.75 * priors + 0.25 * noise
 
-        # -------- 创建子节点 --------
+        # 6. 创建子节点
         for action, prior in zip(sampled_actions, priors):
             action_key = self._action_to_key(action)
             if action_key in node.children:
                 continue
 
-            saved_state = poolenv.save_balls_state(env.balls)
-            self._apply_action(env, action_key)
-
-            new_balls = poolenv.save_balls_state(env.balls)
+            # 使用_simulate_action直接模拟动作，不依赖env对象
+            sim_balls = poolenv.restore_balls_state(balls)
+            new_balls = self._simulate_action(sim_balls, table, action_key)
+            
+            # 生成新的状态向量
+            new_balls_state = poolenv.save_balls_state(new_balls)
             new_state_vec = self._balls_state_to_81(
-                        new_balls,
+                        new_balls_state,
                         my_targets=None,
                         table=None
                     )
             new_state_seq = node.state_seq[1:] + [new_state_vec]
+            
+            # 创建子节点
             node.children[action_key] = MCTSNode(
                 state_seq=new_state_seq,
                 parent=node,
                 prior=prior
             )
-
-            env.balls = poolenv.restore_balls_state(saved_state)
         return value
 
     def _backpropagate(self, node, value):
@@ -308,10 +330,59 @@ class MCTS:
 
 
 
+    def _simulate_action(self, balls, table, action_key):
+        """
+        直接模拟击球动作，不依赖环境对象
+        
+        参数：
+            balls: 球状态字典，{ball_id: Ball对象}
+            table: 球桌对象
+            action_key: 动作元组，(V0, phi, theta, a, b)
+        
+        返回：
+            模拟后的球状态字典
+        """
+        import pooltool as pt
+        
+        # 将动作元组转换为字典
+        action = np.array(action_key, dtype=np.float64)
+        action_dict = {
+            "V0": action[0],
+            "phi": action[1],
+            "theta": action[2],
+            "a": action[3],
+            "b": action[4]
+        }
+        
+        # 创建shot对象并模拟
+        cue = pt.Cue(cue_ball_id="cue")
+        shot = pt.System(table=table, balls=balls, cue=cue)
+        
+        # 设置球杆状态
+        cue.set_state(
+            V0=action_dict["V0"], 
+            phi=action_dict["phi"], 
+            theta=action_dict["theta"], 
+            a=action_dict["a"], 
+            b=action_dict["b"]
+        )
+        
+        # 执行模拟
+        try:
+            pt.simulate(shot, inplace=True)
+        except Exception as e:
+            # 模拟失败时返回原始状态
+            return balls
+        
+        return shot.balls
+
     def _action_to_key(self, action):
         return tuple(np.round(action, 4).tolist())
 
     def _apply_action(self, env, action_key):
+        """
+        兼容旧接口，用于_expand_and_evaluate方法
+        """
         action = np.array(action_key, dtype=np.float64)
         env.take_shot({
             "V0": action[0],
