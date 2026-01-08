@@ -7,21 +7,21 @@ from data_loader import StatePreprocessor
 
 class ActionSampler:
     """
-    在策略网络给出的最优物理动作附近进行连续采样
+    在【归一化动作空间 [0,1]】附近采样
     """
-    def __init__(self, sigma=None):
-        self.sigma = sigma or np.array([0.3, 15.0, 10.0, 0.05, 0.05], dtype=np.float32)
+    def __init__(self, sigma_norm=None):
+        # 归一化空间噪声（经验值）
+        self.sigma_norm = sigma_norm or np.array(
+            [0.08, 0.08, 0.08, 0.05, 0.05],
+            dtype=np.float32
+        )
 
-        # 真实物理动作空间（必须与训练时 action_min / action_max 一致）
-        self.low = np.array([0.5, 0.0, 0.0, -0.5, -0.5], dtype=np.float32)
-        self.high = np.array([8.0, 360.0, 90.0, 0.5, 0.5], dtype=np.float32)
-
-    def sample(self, base_action, n_samples):
+    def sample(self, base_action_norm, n_samples = 8):
         actions = []
         for _ in range(n_samples):
-            noise = np.random.normal(0, self.sigma)
-            a = np.clip(base_action + noise, self.low, self.high)
-            actions.append(a)
+            noise = np.random.normal(0, self.sigma_norm)
+            a_norm = np.clip(base_action_norm + noise, 0.0, 1.0)
+            actions.append(a_norm)
         return actions
 
 
@@ -54,7 +54,7 @@ class MCTS:
         self,
         model,
         env,
-        n_simulations=50,
+        n_simulations=20,
         n_action_samples=8,
         c_puct=1.5,
         device="cuda" if torch.cuda.is_available() else "cpu"
@@ -90,10 +90,23 @@ class MCTS:
 
             # -------- 1. Selection --------
             while node.children:
-                action_key, node = max(
-                    node.children.items(),
-                    key=lambda item: item[1].ucb(self.c_puct)
+                items = list(node.children.items())
+                ucbs = np.array(
+                    [child.ucb(self.c_puct) for _, child in items],
+                    dtype=np.float32
                 )
+
+                # 找到最大 UCB
+                max_ucb = np.max(ucbs)
+
+                # 随机选一个 max-UCB 的 child（关键！）
+                candidates = [
+                    i for i, u in enumerate(ucbs)
+                    if np.isclose(u, max_ucb)
+                ]
+                idx = np.random.choice(candidates)
+
+                action_key, node = items[idx]
                 self._apply_action(env_copy, action_key)
 
             # -------- 2. Expansion + Evaluation --------
@@ -123,25 +136,42 @@ class MCTS:
     # ------------------------------------------------------------------
 
     def _expand_and_evaluate(self, node, env, root_player):
+        
         done, info = env.get_done()
         if done:
             winner = info.get("winner", None)
             return 1.0 if winner == root_player else 0.0
         
+        if node.children:
+            return node.Q
+           
         state_tensor = self._state_seq_to_tensor(node.state_seq)
         state_tensor = state_tensor.unsqueeze(0).to(self.device) 
         # -------- 网络评估 --------
         with torch.no_grad():
             out = self.model(state_tensor)
-            action_norm = out["mapped_actions"][0].cpu().numpy()
+            action_norm = out["policy_output"][0].cpu().numpy()
             value = out["value_output"].item()
 
         # 反归一化得到真实物理动作
         base_action = self._denormalize_action(action_norm)
 
-        # -------- 连续动作采样 --------
-        sampled_actions = self.sampler.sample(base_action, self.n_action_samples)
+        if node.parent is None:
+            print("policy_norm:", action_norm)  # 调试信息
+            print("value:", value)         # 调试信息
+            print("base_action:", base_action)  # 调试信息
+        
 
+        # -------- 连续动作采样 --------
+        sampled_action_norms = self.sampler.sample(
+            action_norm,
+            self.n_action_samples
+        )
+
+        sampled_actions = [
+            self._denormalize_action(a_norm)
+            for a_norm in sampled_action_norms
+        ]
         # 基于相似度构造先验
         distances = np.array(
             [np.linalg.norm(a - base_action) for a in sampled_actions],
@@ -156,19 +186,12 @@ class MCTS:
             if action_key in node.children:
                 continue
 
-            saved_state = poolenv.save_balls_state(env.balls)
-            self._apply_action(env, action_key)
-
-            new_balls = poolenv.save_balls_state(env.balls)
-            new_state_seq = node.state_seq[1:] + [new_balls]
-
+            new_state_seq = node.state_seq[1:] + [node.state_seq[-1]]
             node.children[action_key] = MCTSNode(
                 state_seq=new_state_seq,
                 parent=node,
                 prior=prior
             )
-
-            env.balls = poolenv.restore_balls_state(saved_state)
 
         return value
 
@@ -192,7 +215,8 @@ class MCTS:
         action_norm = np.clip(action_norm, 0.0, 1.0)
         return action_norm * (self.action_max - self.action_min) + self.action_min
 
-    def _balls_state_to_81(self, balls_state, my_targets=None, table=None):
+    @staticmethod
+    def _balls_state_to_81(balls_state, my_targets, table):
         """
         balls_state: dict from poolenv.save_balls_state
         return: np.ndarray shape (81,)
@@ -205,28 +229,44 @@ class MCTS:
             '9', '10', '11', '12', '13', '14', '15'
         ]
 
+        TABLE_WIDTH = 2.845
+        TABLE_LENGTH = 1.4225
+        BALL_RADIUS = 0.0285
+
         for i, ball_id in enumerate(ball_order):
             base = i * 4
+
             if ball_id in balls_state:
                 ball = balls_state[ball_id]
-                rvw = ball.state.rvw  # [pos, vel, spin]
-                pos = rvw[0]          # (x, y, z)
+                rvw = ball.state.rvw
+                pos = rvw[0]
 
-                state[base + 0] = pos[0]
-                state[base + 1] = pos[1]
-                state[base + 2] = pos[2]
-                state[base + 3] = 1.0 if ball.state.s == 4 else 0.0
+                if ball.state.s == 4:  # 进袋
+                    state[base + 0] = -1.0
+                    state[base + 1] = -1.0
+                    state[base + 2] = -1.0
+                    state[base + 3] = 1.0
+                else:
+                    state[base + 0] = pos[0] / TABLE_WIDTH
+                    state[base + 1] = pos[1] / TABLE_LENGTH
+                    state[base + 2] = pos[2] / (2 * BALL_RADIUS)
+                    state[base + 3] = 0.0
             else:
-                # 不存在的球，视为进袋
+                state[base + 0] = -1.0
+                state[base + 1] = -1.0
+                state[base + 2] = -1.0
                 state[base + 3] = 1.0
 
-        # 桌子尺寸
+        # 桌子尺寸（归一化）
         if table is not None:
-            state[64] = table.width
-            state[65] = table.length
+            state[64] = table.width / TABLE_WIDTH
+            state[65] = table.length / TABLE_LENGTH
+        else:
+            state[64] = 1.0
+            state[65] = 1.0
 
         # 目标球 one-hot
-        if my_targets is not None:
+        if my_targets:
             for t in my_targets:
                 idx = int(t) - 1
                 state[66 + idx] = 1.0
@@ -238,15 +278,12 @@ class MCTS:
         state_seq: List[balls_state_dict], len=3
         return: torch.FloatTensor [3, 81]
         """
+        states = np.array(state_seq, dtype=np.float32)
 
-        encoded_states = []
-
-        for balls_state in state_seq:
-            encoded = self._balls_state_to_81(balls_state)
-            encoded_states.append(encoded)
-
-        states = np.stack(encoded_states, axis=0)  # (3, 81)
-
+        if states.shape != (3, 81):
+            raise ValueError(
+                f"MCTS expects state shape (3, 81), got {states.shape}"
+            )
         # 与训练完全一致的归一化
         states = self.state_preprocessor(states)
 
