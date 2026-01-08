@@ -135,7 +135,12 @@ def process_single_match(match_file):
                     ]
 
                     # 价值标签
-                    value = 1.0 if winner == player else 0.0
+                    if winner == "SAME":
+                        # 平局，双方价值都为0.5
+                        value = 0.5
+                    else:
+                        # 非平局，胜利方价值为1.0，失败方为0.0
+                        value = 1.0 if winner == player else 0.0
 
                     # 生成样本
                     train_sample = {
