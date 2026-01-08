@@ -2,6 +2,7 @@ import numpy as np
 import copy
 import torch
 import poolenv
+from data_loader import StatePreprocessor
 
 
 class ActionSampler:
@@ -56,7 +57,7 @@ class MCTS:
         n_simulations=50,
         n_action_samples=8,
         c_puct=1.5,
-        device="cpu"
+        device="cuda" if torch.cuda.is_available() else "cpu"
     ):
         self.model = model
         self.env = env
@@ -70,6 +71,7 @@ class MCTS:
         # ===== 与训练代码完全一致的动作范围 =====
         self.action_min = np.array([0.5, 0.0, 0.0, -0.5, -0.5], dtype=np.float32)
         self.action_max = np.array([8.0, 360.0, 90.0, 0.5, 0.5], dtype=np.float32)
+        self.state_preprocessor = StatePreprocessor()
 
     # ------------------------------------------------------------------
     # 公共接口
@@ -125,12 +127,13 @@ class MCTS:
         if done:
             winner = info.get("winner", None)
             return 1.0 if winner == root_player else 0.0
-
+        
+        state_tensor = self._state_seq_to_tensor(node.state_seq)
+        state_tensor = state_tensor.unsqueeze(0).to(self.device) 
         # -------- 网络评估 --------
         with torch.no_grad():
-            state_tensor = self._state_seq_to_tensor(node.state_seq)
-            out = self.model(state_tensor.unsqueeze(0).to(self.device))
-            action_norm = out["policy_output"][0].cpu().numpy()
+            out = self.model(state_tensor)
+            action_norm = out["mapped_actions"][0].cpu().numpy()
             value = out["value_output"].item()
 
         # 反归一化得到真实物理动作
@@ -189,34 +192,72 @@ class MCTS:
         action_norm = np.clip(action_norm, 0.0, 1.0)
         return action_norm * (self.action_max - self.action_min) + self.action_min
 
-    def _state_seq_to_tensor(self, state_seq):
-        tensors = [self._balls_state_to_tensor(s) for s in state_seq]
-        return torch.cat(tensors, dim=0)
+    def _balls_state_to_81(self, balls_state, my_targets=None, table=None):
+        """
+        balls_state: dict from poolenv.save_balls_state
+        return: np.ndarray shape (81,)
+        """
 
-    def _balls_state_to_tensor(self, state):
-        features = []
-        ball_ids = ['cue'] + [str(i) for i in range(1, 16)]
+        state = np.zeros(81, dtype=np.float32)
 
-        for bid in ball_ids:
-            if bid in state:
-                ball = state[bid]
-                pos, vel, spin = ball.state.rvw
-                features.extend(pos)
-                features.extend(vel)
-                features.extend(spin)
-                features.append(float(ball.state.s))
-                features.append(ball.state.t)
-                features.append(1.0 if ball.state.s == 4 else 0.0)
+        ball_order = [
+            'cue', '1', '2', '3', '4', '5', '6', '7', '8',
+            '9', '10', '11', '12', '13', '14', '15'
+        ]
+
+        for i, ball_id in enumerate(ball_order):
+            base = i * 4
+            if ball_id in balls_state:
+                ball = balls_state[ball_id]
+                rvw = ball.state.rvw  # [pos, vel, spin]
+                pos = rvw[0]          # (x, y, z)
+
+                state[base + 0] = pos[0]
+                state[base + 1] = pos[1]
+                state[base + 2] = pos[2]
+                state[base + 3] = 1.0 if ball.state.s == 4 else 0.0
             else:
-                features.extend([0.0] * 11)
+                # 不存在的球，视为进袋
+                state[base + 3] = 1.0
 
-        return torch.tensor(features, dtype=torch.float32)
+        # 桌子尺寸
+        if table is not None:
+            state[64] = table.width
+            state[65] = table.length
+
+        # 目标球 one-hot
+        if my_targets is not None:
+            for t in my_targets:
+                idx = int(t) - 1
+                state[66 + idx] = 1.0
+
+        return state
+
+    def _state_seq_to_tensor(self, state_seq):
+        """
+        state_seq: List[balls_state_dict], len=3
+        return: torch.FloatTensor [3, 81]
+        """
+
+        encoded_states = []
+
+        for balls_state in state_seq:
+            encoded = self._balls_state_to_81(balls_state)
+            encoded_states.append(encoded)
+
+        states = np.stack(encoded_states, axis=0)  # (3, 81)
+
+        # 与训练完全一致的归一化
+        states = self.state_preprocessor(states)
+
+        return torch.from_numpy(states).float()
+
 
     def _action_to_key(self, action):
         return tuple(np.round(action, 4).tolist())
 
     def _apply_action(self, env, action_key):
-        action = np.array(action_key, dtype=np.float32)
+        action = np.array(action_key, dtype=np.float64)
         env.take_shot({
             "V0": action[0],
             "phi": action[1],
