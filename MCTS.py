@@ -57,7 +57,8 @@ class MCTS:
         n_simulations=5,
         n_action_samples=8,
         c_puct=1.5,
-        device="cuda" if torch.cuda.is_available() else "cpu"
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        debug=False
     ):
         self.model = model
         self.env = env
@@ -65,6 +66,7 @@ class MCTS:
         self.n_action_samples = n_action_samples
         self.c_puct = c_puct
         self.device = device
+        self.debug = debug
 
         self.sampler = ActionSampler()
 
@@ -153,7 +155,7 @@ class MCTS:
         # 反归一化得到真实物理动作
         base_action = self._denormalize_action(action_norm)
 
-        if node.parent is None:
+        if node.parent is None and self.debug:
             print("policy_norm:", action_norm)  # 调试信息
             print("value:", value)         # 调试信息
             print("base_action:", base_action)  # 调试信息
