@@ -369,7 +369,7 @@ class MCTS:
 
     def _simulate_action(self, balls, table, action_key):
         """
-        直接模拟击球动作，添加高斯噪声使模拟更真实
+        直接模拟击球动作，添加高斯噪声和完整的犯规检查
         
         参数：
             balls: 球状态字典，{ball_id: Ball对象}
@@ -395,6 +395,9 @@ class MCTS:
         cue = pt.Cue(cue_ball_id="cue")
         shot = pt.System(table=table, balls=balls, cue=cue)
         
+        # 保存原始状态，用于犯规检查
+        last_state = {bid: ball for bid, ball in balls.items()}
+        
         # 添加高斯噪声，与BasicAgentPro保持一致
         noisy_V0 = np.clip(action_dict["V0"] + np.random.normal(0, self.sim_noise['V0']), 0.5, 8.0)
         noisy_phi = (action_dict["phi"] + np.random.normal(0, self.sim_noise['phi'])) % 360
@@ -416,6 +419,55 @@ class MCTS:
             pt.simulate(shot, inplace=True)
         except Exception as e:
             # 模拟失败时返回原始状态
+            return balls
+        
+        # ===== 检查犯规情况 =====
+        # 1. 基本分析
+        new_pocketed = [bid for bid, b in shot.balls.items() if b.state.s == 4 and last_state[bid].state.s != 4]
+        cue_pocketed = "cue" in new_pocketed
+        eight_pocketed = "8" in new_pocketed
+        
+        # 2. 首球碰撞分析
+        first_contact_ball_id = None
+        valid_ball_ids = {'1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15'}
+        
+        for e in shot.events:
+            et = str(e.event_type).lower()
+            ids = list(e.ids) if hasattr(e, 'ids') else []
+            if ('cushion' not in et) and ('pocket' not in et) and ('cue' in ids):
+                other_ids = [i for i in ids if i != 'cue' and i in valid_ball_ids]
+                if other_ids:
+                    first_contact_ball_id = other_ids[0]
+                    break
+        
+        # 3. 碰库分析
+        cue_hit_cushion = False
+        target_hit_cushion = False
+        
+        for e in shot.events:
+            et = str(e.event_type).lower()
+            ids = list(e.ids) if hasattr(e, 'ids') else []
+            if 'cushion' in et:
+                if 'cue' in ids:
+                    cue_hit_cushion = True
+                if first_contact_ball_id is not None and first_contact_ball_id in ids:
+                    target_hit_cushion = True
+        
+        # 4. 犯规处理
+        # 白球进袋，恢复原始状态
+        if cue_pocketed:
+            return balls
+        
+        # 白球和黑八同时进袋，恢复原始状态
+        if cue_pocketed and eight_pocketed:
+            return balls
+        
+        # 未击中任何球，恢复原始状态
+        if first_contact_ball_id is None:
+            return balls
+        
+        # 无进球且无球碰库，恢复原始状态
+        if len(new_pocketed) == 0 and first_contact_ball_id is not None and (not cue_hit_cushion) and (not target_hit_cushion):
             return balls
         
         return shot.balls
