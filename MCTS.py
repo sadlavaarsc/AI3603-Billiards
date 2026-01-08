@@ -267,6 +267,23 @@ class MCTS:
                 parent=node,
                 prior=prior
             )
+        
+        # ===== 检查并删除无效子节点 =====
+        # 保存原始状态向量，用于比较
+        original_state_vec = node.state_seq[-1]
+        
+        # 找出无效子节点（状态没有变化，说明犯规了）
+        invalid_keys = []
+        for action_key, child in node.children.items():
+            child_state_vec = child.state_seq[-1]
+            # 如果状态向量几乎没有变化，说明该动作导致了犯规（状态被恢复）
+            if np.allclose(child_state_vec, original_state_vec, atol=1e-6):
+                invalid_keys.append(action_key)
+        
+        # 删除无效子节点
+        for key in invalid_keys:
+            del node.children[key]
+        
         return value
 
     def _backpropagate(self, node, value):
@@ -367,6 +384,67 @@ class MCTS:
 
 
 
+    def _check_foul(self, shot, last_state):
+        """
+        检查击球是否犯规
+        
+        参数：
+            shot: 已完成物理模拟的System对象
+            last_state: 击球前的球状态字典
+            
+        返回：
+            bool: True表示犯规，False表示合法
+        """
+        # 1. 基本分析
+        new_pocketed = [bid for bid, b in shot.balls.items() if b.state.s == 4 and last_state[bid].state.s != 4]
+        cue_pocketed = "cue" in new_pocketed
+        eight_pocketed = "8" in new_pocketed
+        
+        # 2. 首球碰撞分析
+        first_contact_ball_id = None
+        valid_ball_ids = {'1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15'}
+        
+        for e in shot.events:
+            et = str(e.event_type).lower()
+            ids = list(e.ids) if hasattr(e, 'ids') else []
+            if ('cushion' not in et) and ('pocket' not in et) and ('cue' in ids):
+                other_ids = [i for i in ids if i != 'cue' and i in valid_ball_ids]
+                if other_ids:
+                    first_contact_ball_id = other_ids[0]
+                    break
+        
+        # 3. 碰库分析
+        cue_hit_cushion = False
+        target_hit_cushion = False
+        
+        for e in shot.events:
+            et = str(e.event_type).lower()
+            ids = list(e.ids) if hasattr(e, 'ids') else []
+            if 'cushion' in et:
+                if 'cue' in ids:
+                    cue_hit_cushion = True
+                if first_contact_ball_id is not None and first_contact_ball_id in ids:
+                    target_hit_cushion = True
+        
+        # 4. 犯规判断
+        # 白球进袋
+        if cue_pocketed:
+            return True
+        
+        # 白球和黑八同时进袋
+        if cue_pocketed and eight_pocketed:
+            return True
+        
+        # 未击中任何球
+        if first_contact_ball_id is None:
+            return True
+        
+        # 无进球且无球碰库
+        if len(new_pocketed) == 0 and first_contact_ball_id is not None and (not cue_hit_cushion) and (not target_hit_cushion):
+            return True
+        
+        return False
+
     def _simulate_action(self, balls, table, action_key):
         """
         直接模拟击球动作，添加高斯噪声和完整的犯规检查
@@ -421,53 +499,8 @@ class MCTS:
             # 模拟失败时返回原始状态
             return balls
         
-        # ===== 检查犯规情况 =====
-        # 1. 基本分析
-        new_pocketed = [bid for bid, b in shot.balls.items() if b.state.s == 4 and last_state[bid].state.s != 4]
-        cue_pocketed = "cue" in new_pocketed
-        eight_pocketed = "8" in new_pocketed
-        
-        # 2. 首球碰撞分析
-        first_contact_ball_id = None
-        valid_ball_ids = {'1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15'}
-        
-        for e in shot.events:
-            et = str(e.event_type).lower()
-            ids = list(e.ids) if hasattr(e, 'ids') else []
-            if ('cushion' not in et) and ('pocket' not in et) and ('cue' in ids):
-                other_ids = [i for i in ids if i != 'cue' and i in valid_ball_ids]
-                if other_ids:
-                    first_contact_ball_id = other_ids[0]
-                    break
-        
-        # 3. 碰库分析
-        cue_hit_cushion = False
-        target_hit_cushion = False
-        
-        for e in shot.events:
-            et = str(e.event_type).lower()
-            ids = list(e.ids) if hasattr(e, 'ids') else []
-            if 'cushion' in et:
-                if 'cue' in ids:
-                    cue_hit_cushion = True
-                if first_contact_ball_id is not None and first_contact_ball_id in ids:
-                    target_hit_cushion = True
-        
-        # 4. 犯规处理
-        # 白球进袋，恢复原始状态
-        if cue_pocketed:
-            return balls
-        
-        # 白球和黑八同时进袋，恢复原始状态
-        if cue_pocketed and eight_pocketed:
-            return balls
-        
-        # 未击中任何球，恢复原始状态
-        if first_contact_ball_id is None:
-            return balls
-        
-        # 无进球且无球碰库，恢复原始状态
-        if len(new_pocketed) == 0 and first_contact_ball_id is not None and (not cue_hit_cushion) and (not target_hit_cushion):
+        # 检查是否犯规
+        if self._check_foul(shot, last_state):
             return balls
         
         return shot.balls
