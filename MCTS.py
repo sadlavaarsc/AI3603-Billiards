@@ -53,11 +53,13 @@ class MCTS:
                  n_simulations=150,
                  c_puct=1.414,
                  max_depth=3,
+                 max_search_time=7.0,
                  device="cuda" if torch.cuda.is_available() else "cpu"):
         self.model = model
         self.n_simulations = n_simulations
         self.c_puct = c_puct
         self.max_depth = max_depth
+        self.max_search_time = max_search_time  # 搜索限时，单位：秒
         self.device = device
         self.ball_radius = 0.028575
         
@@ -503,6 +505,8 @@ class MCTS:
         返回：
             numpy数组: 最佳动作，包含V0、phi、theta、a、b五个属性
         """
+        import time
+        
         root = MCTSNode(state_seq)
         
         # 生成候选动作
@@ -515,8 +519,23 @@ class MCTS:
         # 计算当前回合的实际最大深度，不超过剩余杆数
         current_max_depth = min(self.max_depth, remaining_hits)
         
+        # 记录搜索开始时间
+        start_time = time.time()
+        
         # MCTS循环
+        simulation_count = 0
+        time_exceeded = False
+        
         for _ in range(self.n_simulations):
+            # 检查是否超过搜索时间限制
+            elapsed_time = time.time() - start_time
+            if elapsed_time > self.max_search_time:
+                time_exceeded = True
+                print(f"[Multi-step MCTS] 搜索时间超过限制 ({elapsed_time:.2f}s > {self.max_search_time}s)，提前终止搜索")
+                break
+            
+            simulation_count += 1
+            
             # 1. Selection (UCB)
             if np.sum(N) < n_candidates:
                 idx = int(np.sum(N))
@@ -558,12 +577,28 @@ class MCTS:
             N[idx] += 1
             Q[idx] += (value - Q[idx]) / N[idx]
         
+        # 如果时间超限，为未搜索的动作使用模型生成value
+        if time_exceeded:
+            # 使用模型为未搜索的动作生成value
+            state_tensor = self._state_seq_to_tensor(root.state_seq)
+            state_tensor = state_tensor.unsqueeze(0).to(self.device)
+            
+            with torch.no_grad():
+                out = self.model(state_tensor)
+                model_value = out["value_output"].item()
+            
+            # 为未搜索的动作设置模型value
+            for idx in range(n_candidates):
+                if N[idx] == 0:  # 未搜索的动作
+                    Q[idx] = model_value
+                    N[idx] = 1  # 标记为已处理
+        
         # Final Decision
         avg_rewards = Q
         best_idx = np.argmax(avg_rewards)
         best_action = candidate_actions[best_idx]
         
-        print(f"[Multi-step MCTS] Best Avg Score: {avg_rewards[best_idx]:.3f} (Sims: {self.n_simulations})")
+        print(f"[Multi-step MCTS] Best Avg Score: {avg_rewards[best_idx]:.3f} (Sims: {simulation_count}/{self.n_simulations})")
         
         # 转换为numpy数组返回
         return np.array([best_action['V0'], best_action['phi'], best_action['theta'], best_action['a'], best_action['b']], dtype=np.float32)
