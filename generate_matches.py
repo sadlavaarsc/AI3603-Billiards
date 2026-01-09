@@ -8,7 +8,9 @@ from datetime import datetime
 
 # 导入环境和Agent
 from poolenv import PoolEnv
-from agents import BasicAgentPro
+from agents import MCTSAgent
+from dual_network import DualNetwork
+import torch
 
 def save_match_data(match_data, output_dir, match_id=None):
     """保存单局比赛数据到文件"""
@@ -171,7 +173,31 @@ def generate_matches(num_matches, output_dir, enable_noise=True, max_hit_count=2
         list: 生成的文件路径列表
     """
     env = PoolEnv()
-    agent = BasicAgentPro()  # 使用贝叶斯优化版AI进行自对弈
+    
+    # 初始化MCTSAgent
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = DualNetwork()
+    
+    # 尝试加载预训练模型，如果没有则使用随机初始化模型
+    try:
+        model.load('./models/dual_network_final.pt')
+        if verbose:
+            print("成功加载预训练模型")
+    except Exception as e:
+        print(f"未找到预训练模型，使用随机初始化模型: {e}")
+    
+    model.to(device)
+    model.eval()
+    
+    # 初始化MCTSAgent
+    agent = MCTSAgent(
+        model=model, 
+        env=env, 
+        n_simulations=5, 
+        n_action_samples=8, 
+        device=device, 
+        debug=verbose
+    )
     
     file_paths = []
     
