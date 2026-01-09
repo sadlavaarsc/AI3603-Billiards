@@ -11,13 +11,13 @@ mcts_vs_basic.py - MCTS Agent 与 Basic Agent 对弈脚本
 # 导入必要的模块
 from utils import set_random_seed
 from poolenv import PoolEnv
-from agents import BasicAgent, MCTSAgent, DirectModelAgent
+from agents import BasicAgent, MCTSAgent, DirectModelAgent, BasicAgentPro
 from dual_network import DualNetwork
 import torch
 import sys
 
 # 设置随机种子，enable=True 时使用固定种子，enable=False 时使用完全随机
-set_random_seed(enable=False, seed=42)
+set_random_seed(enable=True, seed=42)
 
 
 def print_current_stats(current_game, total_games, results):
@@ -84,8 +84,8 @@ def main():
     model.eval()
 
     # 初始化 Agent
-    agent_a = BasicAgent()
-    agent_b = MCTSAgent(model=model, env=env, n_simulations=5, device=device)
+    agent_a = BasicAgentPro()
+    agent_b = MCTSAgent(model=model, env=env, n_simulations=50, device=device)
 
     players = [agent_a, agent_b]  # 用于切换先后手
     target_ball_choice = ['solid', 'solid', 'stripe', 'stripe']  # 轮换球型
