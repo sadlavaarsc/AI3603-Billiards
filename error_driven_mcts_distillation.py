@@ -61,6 +61,39 @@ def filter_no_pocketing_states(match_dir, max_states=5000):
     return no_pocketing_states
 
 
+def convert_dict_to_ball_objects(balls_dict):
+    """
+    将普通字典转换为pooltool的Ball对象字典
+    
+    参数：
+        balls_dict: 普通字典，包含球的x, y, z, vx, vy, vz, s等字段
+    
+    返回：
+        dict: 包含Ball对象的字典
+    """
+    import pooltool as pt
+    
+    balls = {}
+    for ball_id, ball_data in balls_dict.items():
+        if ball_id == 'cue':
+            ball = pt.CueBall.make()
+        else:
+            ball = pt.ObjectBall.make(ball_id)
+        
+        # 设置球的位置和状态
+        ball.state.rvw[0][0] = ball_data['x']
+        ball.state.rvw[0][1] = ball_data['y']
+        ball.state.rvw[0][2] = ball_data['z']
+        ball.state.rvw[1][0] = ball_data.get('vx', 0.0)
+        ball.state.rvw[1][1] = ball_data.get('vy', 0.0)
+        ball.state.rvw[1][2] = ball_data.get('vz', 0.0)
+        ball.state.s = ball_data['s']
+        
+        balls[ball_id] = ball
+    
+    return balls
+
+
 def evaluate_states_with_basic_agent(states, threshold=0.3):
     """
     使用basic_agent_pro对状态进行评估，筛选出value波动较大的状态
@@ -82,26 +115,26 @@ def evaluate_states_with_basic_agent(states, threshold=0.3):
         pre_state = shot['pre_state']
         
         try:
-            # 直接使用pre_state中的数据，不转换为pooltool对象
-            balls = pre_state['balls']
+            # 将普通字典转换为Ball对象字典
+            balls_dict = pre_state['balls']
+            balls = convert_dict_to_ball_objects(balls_dict)
             my_targets = pre_state['my_targets']
             
-            # 使用BasicAgentPro的决策方法获取最佳动作和分数
-            # 注意：BasicAgentPro的decision方法会自动处理所有pooltool对象转换
-            action = basic_agent.decision(balls=balls, my_targets=my_targets, table=None)
+            # 创建临时球桌对象
+            import pooltool as pt
+            table = pt.Table.default()
             
-            # 由于我们需要评估多个动作的value波动，
-            # 我们需要重新实现一个简单的评估函数
-            # 这里我们使用BasicAgentPro的核心逻辑，但避免直接使用pooltool API
+            # 使用BasicAgentPro的决策方法获取最佳动作
+            action = basic_agent.decision(balls=balls, my_targets=my_targets, table=table)
             
             # 生成候选动作
-            candidate_actions = basic_agent.generate_heuristic_actions(balls, my_targets, None)
+            candidate_actions = basic_agent.generate_heuristic_actions(balls, my_targets, table)
             
             # 对每个候选动作进行评估
             values = []
             for candidate_action in candidate_actions:
-                # 使用basic_agent的simulate_action方法，它内部会处理pooltool对象转换
-                simulated_shot = basic_agent.simulate_action(balls, None, candidate_action)
+                # 使用basic_agent的simulate_action方法
+                simulated_shot = basic_agent.simulate_action(balls, table, candidate_action)
                 
                 # 计算奖励
                 if simulated_shot is None:
@@ -125,6 +158,8 @@ def evaluate_states_with_basic_agent(states, threshold=0.3):
                 if fluctuation >= threshold:
                     filtered_states.append({
                         **state_data,
+                        'balls': balls,
+                        'table': table,
                         'fluctuation': fluctuation,
                         'values': values,
                         'max_value': max_value,
@@ -163,16 +198,17 @@ def run_mcts_on_states(states, model_path, n_simulations=50):
     result_states = []
     
     for state_data in tqdm(states, desc="Running MCTS on states"):
-        shot = state_data['shot']
-        pre_state = shot['pre_state']
-        
         try:
+            # 直接使用之前已经转换好的Ball对象字典
+            balls = state_data['balls']
+            my_targets = state_data['my_targets']
+            table = state_data['table']
+            
             # 使用MCTSAgent的decision方法获取最佳动作
-            # MCTSAgent内部会处理所有MCTS交互和pooltool对象转换
             best_action = mcts_agent.decision(
-                balls_state=pre_state['balls'],
-                my_targets=pre_state['my_targets'],
-                table=None
+                balls_state=balls,
+                my_targets=my_targets,
+                table=table
             )
             
             # 将动作转换为numpy数组
@@ -184,11 +220,27 @@ def run_mcts_on_states(states, model_path, n_simulations=50):
                 best_action['b']
             ])
             
+            # 重新计算最佳动作的value
+            # 使用之前的BasicAgentPro和analyze_shot_for_reward函数
+            basic_agent = BasicAgentPro(n_simulations=50, c_puct=1.414)
+            
+            # 模拟动作
+            last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+            shot = basic_agent.simulate_action(balls, table, best_action)
+            
+            # 计算奖励
+            if shot is None:
+                best_value = 0.0
+            else:
+                raw_reward = analyze_shot_for_reward(shot, last_state_snapshot, my_targets)
+                best_value = (raw_reward - (-500)) / 650.0
+                best_value = np.clip(best_value, 0.0, 1.0)
+            
             # 添加到结果列表
             result_states.append({
                 **state_data,
                 'best_action': best_action_array.tolist(),
-                'best_value': 0.0  # MCTSAgent不直接返回value，我们可以后续处理
+                'best_value': best_value
             })
             
         except Exception as e:
