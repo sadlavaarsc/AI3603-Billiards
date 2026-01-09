@@ -105,6 +105,9 @@ class MCTS:
         self.action_max = np.array([8.0, 360.0, 90.0, 0.5, 0.5], dtype=np.float32)
         self.state_preprocessor = StatePreprocessor()
         
+        # ===== 物理校准相关参数 =====
+        self.ball_radius = 0.028575  # 台球半径，用于幽灵球计算
+        
         # ===== 阶段感知（Game-Phase Aware）相关参数 =====
         # 阶段常量定义
         self.EARLY = "EARLY"
@@ -260,15 +263,26 @@ class MCTS:
 
         # 3. 反归一化得到真实物理动作
         base_action = self._denormalize_action(action_norm)
+        
+        # 4. 校准策略动作，确保能打中球
+        my_targets = player_targets[root_player]
+        calibrated_action = self._calibrate_policy_action(base_action, balls, my_targets, table)
+        
+        # 5. 重新归一化校准后的动作，用于采样
+        # 将校准后的动作转回归一化空间
+        calibrated_action_norm = (calibrated_action - self.action_min) / (self.action_max - self.action_min)
+        calibrated_action_norm = np.clip(calibrated_action_norm, 0.0, 1.0)
 
         if node.parent is None and self.debug:
             print("policy_norm:", action_norm)  # 调试信息
+            print("calibrated_policy_norm:", calibrated_action_norm)  # 调试信息
             print("value:", value)         # 调试信息
             print("base_action:", base_action)  # 调试信息
+            print("calibrated_action:", calibrated_action)  # 调试信息
         
-        # 4. 连续动作采样
+        # 6. 连续动作采样 - 使用校准后的动作进行采样
         sampled_action_norms = self.sampler.sample(
-            action_norm,
+            calibrated_action_norm,
             self.n_action_samples
         )
 
@@ -481,6 +495,111 @@ class MCTS:
             return self.LATE
         else:
             return self.MID
+    
+    def _calc_angle_degrees(self, v):
+        """
+        计算向量的角度（度）
+        
+        参数：
+            v: 二维向量
+            
+        返回：
+            float: 角度（0-360度）
+        """
+        import math
+        angle = math.degrees(math.atan2(v[1], v[0]))
+        return angle % 360
+    
+    def _get_ghost_ball_target(self, cue_pos, obj_pos, pocket_pos):
+        """
+        计算幽灵球目标位置和角度
+        
+        参数：
+            cue_pos: 白球位置
+            obj_pos: 目标球位置
+            pocket_pos: 袋口位置
+            
+        返回：
+            tuple: (phi角度, 白球到幽灵球的距离)
+        """
+        import numpy as np
+        vec_obj_to_pocket = np.array(pocket_pos) - np.array(obj_pos)
+        dist_obj_to_pocket = np.linalg.norm(vec_obj_to_pocket)
+        if dist_obj_to_pocket == 0: return 0, 0
+        unit_vec = vec_obj_to_pocket / dist_obj_to_pocket
+        ghost_pos = np.array(obj_pos) - unit_vec * (2 * self.ball_radius)
+        vec_cue_to_ghost = ghost_pos - np.array(cue_pos)
+        dist_cue_to_ghost = np.linalg.norm(vec_cue_to_ghost)
+        phi = self._calc_angle_degrees(vec_cue_to_ghost)
+        return phi, dist_cue_to_ghost
+    
+    def _calibrate_policy_action(self, action, balls, my_targets, table):
+        """
+        校准策略网络输出的动作，确保能打中球
+        
+        参数：
+            action: 策略网络输出的动作（归一化前的真实物理动作）
+            balls: 当前球状态字典
+            my_targets: 当前玩家的目标球列表
+            table: 球桌对象
+            
+        返回：
+            np.array: 校准后的动作
+        """
+        import numpy as np
+        
+        # 获取白球位置
+        cue_ball = balls.get('cue')
+        if not cue_ball:
+            return action  # 没有白球，无法校准，返回原始动作
+        cue_pos = cue_ball.state.rvw[0]
+        
+        # 获取所有目标球的ID
+        target_ids = [bid for bid in my_targets if balls[bid].state.s != 4]
+        
+        # 如果没有目标球了（理论上外部会处理转为8号，这里兜底）
+        if not target_ids:
+            target_ids = ['8']
+        
+        # 获取所有袋口位置
+        pocket_positions = [pocket.center for pocket in table.pockets.values()]
+        
+        # 计算所有可能的幽灵球目标角度
+        all_ghost_angles = []
+        for tid in target_ids:
+            obj_ball = balls[tid]
+            obj_pos = obj_ball.state.rvw[0]
+            
+            for pocket_pos in pocket_positions:
+                phi_ideal, dist = self._get_ghost_ball_target(cue_pos, obj_pos, pocket_pos)
+                if dist > 0:  # 有效的幽灵球位置
+                    all_ghost_angles.append(phi_ideal)
+        
+        if not all_ghost_angles:
+            return action  # 没有有效的幽灵球位置，返回原始动作
+        
+        # 计算原始动作的角度
+        original_phi = action[1]  # action的第二个元素是phi角度
+        
+        # 找到与原始角度最接近的幽灵球角度
+        min_diff = float('inf')
+        best_phi = original_phi
+        
+        for ghost_phi in all_ghost_angles:
+            # 计算角度差（考虑360度循环）
+            diff = abs(ghost_phi - original_phi)
+            if diff > 180:
+                diff = 360 - diff
+            
+            if diff < min_diff:
+                min_diff = diff
+                best_phi = ghost_phi
+        
+        # 校准动作的角度为最接近的幽灵球角度
+        calibrated_action = action.copy()
+        calibrated_action[1] = best_phi
+        
+        return calibrated_action
 
 
 
