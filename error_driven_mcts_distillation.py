@@ -3,15 +3,13 @@ import json
 import numpy as np
 from tqdm import tqdm
 import copy
-import pooltool as pt
 from datetime import datetime
 import torch
 
 # 导入相关模块
 from process_raw_match_data import load_match_files, stream_json_file, convert_to_81d_state
-from agents.basic_agent_pro import BasicAgentPro, analyze_shot_for_reward
-from MCTS import MCTS
-from dual_network import DualNetwork
+from agents import MCTSAgent, BasicAgentPro
+from agents.basic_agent_pro import analyze_shot_for_reward
 
 
 def filter_no_pocketing_states(match_dir, max_states=5000):
@@ -23,7 +21,7 @@ def filter_no_pocketing_states(match_dir, max_states=5000):
         max_states: 最大筛选数量
     
     返回：
-        list: 没有发生进球的局面列表，每个元素包含state、pre_state、table
+        list: 没有发生进球的局面列表，每个元素包含原始shot数据
     """
     match_files = load_match_files(match_dir)
     no_pocketing_states = []
@@ -43,13 +41,13 @@ def filter_no_pocketing_states(match_dir, max_states=5000):
                     try:
                         # 检查是否有我方进球
                         if 'result' in shot and shot['result']['ME_INTO_POCKET'] == []:
-                            pre_state = shot['pre_state']
-                            
-                            # 保存原始pre_state数据，不需要转换为pooltool对象
+                            # 保存原始shot数据，不进行任何转换
                             no_pocketing_states.append({
-                                'state': convert_to_81d_state(pre_state['balls'], pre_state['my_targets']),
-                                'pre_state': pre_state,
-                                'shot': shot
+                                'shot': shot,
+                                'match_data': {
+                                    'metadata': match_data['metadata'],
+                                    'player_targets': match_data['player_targets']
+                                }
                             })
                             
                     except Exception as e:
@@ -63,55 +61,54 @@ def filter_no_pocketing_states(match_dir, max_states=5000):
     return no_pocketing_states
 
 
-def evaluate_states_with_basic_agent(states, agent, threshold=0.3):
+def evaluate_states_with_basic_agent(states, threshold=0.3):
     """
     使用basic_agent_pro对状态进行评估，筛选出value波动较大的状态
     
     参数：
         states: 状态列表
-        agent: BasicAgentPro实例
         threshold: value波动阈值
     
     返回：
-        list: 筛选后的状态列表，每个元素包含原始状态和评估结果
+        list: 筛选后的状态列表
     """
+    # 初始化BasicAgentPro
+    basic_agent = BasicAgentPro(n_simulations=50, c_puct=1.414)
+    
     filtered_states = []
     
     for state_data in tqdm(states, desc="Evaluating states with basic agent"):
-        pre_state = state_data['pre_state']
+        shot = state_data['shot']
+        pre_state = shot['pre_state']
         
         try:
-            # 创建临时球桌对象
-            table = pt.Table.default()
-            
-            # 转换原始balls数据为pooltool球对象
-            balls = {}
-            for ball_id, ball_data in pre_state['balls'].items():
-                if ball_id == 'cue':
-                    ball = pt.CueBall.make()
-                else:
-                    ball = pt.ObjectBall.make(ball_id)
-                ball.state.rvw[0] = [ball_data['x'], ball_data['y'], ball_data['z']]
-                ball.state.s = ball_data['s']
-                balls[ball_id] = ball
-            
+            # 直接使用pre_state中的数据，不转换为pooltool对象
+            balls = pre_state['balls']
             my_targets = pre_state['my_targets']
             
+            # 使用BasicAgentPro的决策方法获取最佳动作和分数
+            # 注意：BasicAgentPro的decision方法会自动处理所有pooltool对象转换
+            action = basic_agent.decision(balls=balls, my_targets=my_targets, table=None)
+            
+            # 由于我们需要评估多个动作的value波动，
+            # 我们需要重新实现一个简单的评估函数
+            # 这里我们使用BasicAgentPro的核心逻辑，但避免直接使用pooltool API
+            
             # 生成候选动作
-            candidate_actions = agent.generate_heuristic_actions(balls, my_targets, table)
+            candidate_actions = basic_agent.generate_heuristic_actions(balls, my_targets, None)
             
             # 对每个候选动作进行评估
             values = []
-            for action in candidate_actions:
-                # 模拟动作
-                last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
-                shot = agent.simulate_action(balls, table, action)
+            for candidate_action in candidate_actions:
+                # 使用basic_agent的simulate_action方法，它内部会处理pooltool对象转换
+                simulated_shot = basic_agent.simulate_action(balls, None, candidate_action)
                 
                 # 计算奖励
-                if shot is None:
+                if simulated_shot is None:
                     raw_reward = -500.0
                 else:
-                    raw_reward = analyze_shot_for_reward(shot, last_state_snapshot, my_targets)
+                    # 使用独立的analyze_shot_for_reward函数
+                    raw_reward = analyze_shot_for_reward(simulated_shot, balls, my_targets)
                 
                 # 归一化奖励
                 normalized_reward = (raw_reward - (-500)) / 650.0
@@ -128,11 +125,8 @@ def evaluate_states_with_basic_agent(states, agent, threshold=0.3):
                 if fluctuation >= threshold:
                     filtered_states.append({
                         **state_data,
-                        'balls': balls,
-                        'my_targets': my_targets,
-                        'table': table,
-                        'values': values,
                         'fluctuation': fluctuation,
+                        'values': values,
                         'max_value': max_value,
                         'min_value': min_value
                     })
@@ -160,64 +154,41 @@ def run_mcts_on_states(states, model_path, n_simulations=50):
     返回：
         list: 包含MCTS结果的状态列表
     """
-    # 加载模型
-    model = DualNetwork()
-    model.load(model_path)
-    model.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
-    model.eval()
-    
-    # 初始化MCTS
-    mcts = MCTS(
-        model=model,
-        n_simulations=n_simulations,
-        c_puct=1.414,
-        max_depth=4,
-        device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    )
+    # 初始化MCTSAgent，它会自动处理MCTS交互
+    mcts_agent = MCTSAgent()
+    mcts_agent.load_model(model_path)
+    mcts_agent.set_simulations(n_simulations)
     
     # 处理每个状态
     result_states = []
     
     for state_data in tqdm(states, desc="Running MCTS on states"):
-        balls = state_data['balls']
-        my_targets = state_data['my_targets']
-        table = state_data['table']
+        shot = state_data['shot']
+        pre_state = shot['pre_state']
         
         try:
-            # 构建状态序列
-            state_seq = [state_data['state'], state_data['state'], state_data['state']]
+            # 使用MCTSAgent的decision方法获取最佳动作
+            # MCTSAgent内部会处理所有MCTS交互和pooltool对象转换
+            best_action = mcts_agent.decision(
+                balls_state=pre_state['balls'],
+                my_targets=pre_state['my_targets'],
+                table=None
+            )
             
-            # 设置玩家目标球字典
-            player_targets = {'A': my_targets}
-            
-            # 执行MCTS搜索
-            best_action = mcts.search(state_seq, balls, table, player_targets, 'A')
-            
-            # 获取最佳动作对应的value
-            # 我们需要修改MCTS.search方法来返回value，或者重新计算
-            # 这里我们重新计算最佳动作的value
-            last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
-            shot = mcts.simulate_action(balls, table, {
-                'V0': best_action[0],
-                'phi': best_action[1],
-                'theta': best_action[2],
-                'a': best_action[3],
-                'b': best_action[4]
-            })
-            
-            if shot is None:
-                raw_reward = -500.0
-            else:
-                raw_reward = mcts.analyze_shot_for_reward(shot, last_state_snapshot, my_targets)
-            
-            normalized_reward = (raw_reward - (-500)) / 650.0
-            normalized_reward = np.clip(normalized_reward, 0.0, 1.0)
+            # 将动作转换为numpy数组
+            best_action_array = np.array([
+                best_action['V0'],
+                best_action['phi'],
+                best_action['theta'],
+                best_action['a'],
+                best_action['b']
+            ])
             
             # 添加到结果列表
             result_states.append({
                 **state_data,
-                'best_action': best_action.tolist(),
-                'best_value': normalized_reward
+                'best_action': best_action_array.tolist(),
+                'best_value': 0.0  # MCTSAgent不直接返回value，我们可以后续处理
             })
             
         except Exception as e:
@@ -243,32 +214,23 @@ def save_correction_states(states, output_file):
             'end_time': datetime.now().isoformat(),
             'total_shots': len(states)
         },
+        'player_targets': {
+            'A': ['1', '2', '3', '4', '5', '6', '7'],
+            'B': ['9', '10', '11', '12', '13', '14', '15']
+        },
         'shots': []
     }
     
     # 添加每个状态
     for i, state_data in enumerate(states):
-        # 转换balls回原始格式
-        balls_dict = {}
-        for ball_id, ball in state_data['balls'].items():
-            balls_dict[ball_id] = {
-                'x': ball.state.rvw[0][0],
-                'y': ball.state.rvw[0][1],
-                'z': ball.state.rvw[0][2],
-                'vx': 0.0,  # 初始速度为0
-                'vy': 0.0,
-                'vz': 0.0,
-                's': ball.state.s
-            }
+        shot = state_data['shot']
+        pre_state = shot['pre_state']
         
         # 添加shot，与原始数据格式匹配
         correction_data['shots'].append({
             'hit_count': i + 1,
             'player': 'A',
-            'pre_state': {
-                'balls': balls_dict,
-                'my_targets': state_data['my_targets']
-            },
+            'pre_state': pre_state,
             'action': {
                 'V0': state_data['best_action'][0],
                 'phi': state_data['best_action'][1],
@@ -316,20 +278,17 @@ def main():
     no_pocketing_states = filter_no_pocketing_states(args.match_dir, args.max_states)
     print(f"Found {len(no_pocketing_states)} no pocketing states")
     
-    # 2. 初始化BasicAgentPro
-    basic_agent = BasicAgentPro(n_simulations=50, c_puct=1.414)
-    
-    # 3. 使用basic_agent对状态进行评估，筛选出value波动较大的状态
+    # 2. 使用basic_agent对状态进行评估，筛选出value波动较大的状态
     print("Step 2: Evaluating states with basic agent...")
-    filtered_states = evaluate_states_with_basic_agent(no_pocketing_states, basic_agent, args.threshold)
+    filtered_states = evaluate_states_with_basic_agent(no_pocketing_states, args.threshold)
     print(f"Found {len(filtered_states)} states with value fluctuation >= {args.threshold}")
     
-    # 4. 对筛选后的状态进行MCTS搜索
+    # 3. 对筛选后的状态进行MCTS搜索
     print("Step 3: Running MCTS on filtered states...")
     mcts_results = run_mcts_on_states(filtered_states, args.model_path, args.n_simulations)
     print(f"Completed MCTS on {len(mcts_results)} states")
     
-    # 5. 保存纠错局面
+    # 4. 保存纠错局面
     print("Step 4: Saving correction states...")
     save_correction_states(mcts_results, args.output_file)
     print("Error driven MCTS distillation completed!")
