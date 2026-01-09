@@ -11,8 +11,9 @@ class ActionSampler:
     """
     def __init__(self, sigma_norm=None):
         # 归一化空间噪声（经验值）
+        # 增大力度维度(V0)的噪声标准差，从0.08增加到0.2，改善力度控制
         self.sigma_norm = sigma_norm or np.array(
-            [0.08, 0.08, 0.08, 0.05, 0.05],
+            [0.2, 0.08, 0.08, 0.05, 0.05],
             dtype=np.float32
         )
 
@@ -59,7 +60,7 @@ class MCTS:
         c_puct=1.5,
         device="cuda" if torch.cuda.is_available() else "cpu",
         debug=False,
-        n_rollouts_per_action=3  # 每个action的模拟次数，默认3次
+        n_rollouts_per_action=1  # 每个action的模拟次数，默认3次
     ):
         self.model = model
         self.env = env
