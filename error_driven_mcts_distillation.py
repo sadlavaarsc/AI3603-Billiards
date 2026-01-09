@@ -23,7 +23,7 @@ def filter_no_pocketing_states(match_dir, max_states=5000):
         max_states: 最大筛选数量
     
     返回：
-        list: 没有发生进球的局面列表，每个元素包含state、balls、my_targets、table
+        list: 没有发生进球的局面列表，每个元素包含state、pre_state、table
     """
     match_files = load_match_files(match_dir)
     no_pocketing_states = []
@@ -45,26 +45,11 @@ def filter_no_pocketing_states(match_dir, max_states=5000):
                         if 'result' in shot and shot['result']['ME_INTO_POCKET'] == []:
                             pre_state = shot['pre_state']
                             
-                            # 创建临时球桌对象用于后续评估
-                            table = pt.PocketTable(model="7_foot")
-                            
-                            # 转换为pooltool球对象
-                            balls = {}
-                            for ball_id, ball_data in pre_state['balls'].items():
-                                if ball_id == 'cue':
-                                    ball = pt.CueBall.make()
-                                else:
-                                    ball = pt.ObjectBall.make(ball_id)
-                                ball.state.rvw[0] = [ball_data['x'], ball_data['y'], ball_data['z']]
-                                ball.state.s = ball_data['s']
-                                balls[ball_id] = ball
-                            
-                            # 添加到列表
+                            # 保存原始pre_state数据，不需要转换为pooltool对象
                             no_pocketing_states.append({
                                 'state': convert_to_81d_state(pre_state['balls'], pre_state['my_targets']),
-                                'balls': balls,
-                                'my_targets': pre_state['my_targets'],
-                                'table': table
+                                'pre_state': pre_state,
+                                'shot': shot
                             })
                             
                     except Exception as e:
@@ -93,11 +78,25 @@ def evaluate_states_with_basic_agent(states, agent, threshold=0.3):
     filtered_states = []
     
     for state_data in tqdm(states, desc="Evaluating states with basic agent"):
-        balls = state_data['balls']
-        my_targets = state_data['my_targets']
-        table = state_data['table']
+        pre_state = state_data['pre_state']
         
         try:
+            # 创建临时球桌对象
+            table = pt.Table.default()
+            
+            # 转换原始balls数据为pooltool球对象
+            balls = {}
+            for ball_id, ball_data in pre_state['balls'].items():
+                if ball_id == 'cue':
+                    ball = pt.CueBall.make()
+                else:
+                    ball = pt.ObjectBall.make(ball_id)
+                ball.state.rvw[0] = [ball_data['x'], ball_data['y'], ball_data['z']]
+                ball.state.s = ball_data['s']
+                balls[ball_id] = ball
+            
+            my_targets = pre_state['my_targets']
+            
             # 生成候选动作
             candidate_actions = agent.generate_heuristic_actions(balls, my_targets, table)
             
@@ -129,6 +128,9 @@ def evaluate_states_with_basic_agent(states, agent, threshold=0.3):
                 if fluctuation >= threshold:
                     filtered_states.append({
                         **state_data,
+                        'balls': balls,
+                        'my_targets': my_targets,
+                        'table': table,
                         'values': values,
                         'fluctuation': fluctuation,
                         'max_value': max_value,
