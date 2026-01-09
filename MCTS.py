@@ -116,7 +116,7 @@ class MCTS:
         
         # 阶段参数集中管理
         self.PHASE_PARAMS = {
-            self.EARLY: {"value_factor": 0.7, "cpuct": 1.2},  # 开局：降低价值影响，增加探索
+            self.EARLY: {"value_factor": 1.0, "cpuct": 1.0},  # 开局：降低价值影响，增加探索
             self.MID: {"value_factor": 1.0, "cpuct": 1.0},    # 中盘：正常参数
             self.LATE: {"value_factor": 1.4, "cpuct": 0.7}    # 终盘：放大价值影响，减少探索
         }
