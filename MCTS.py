@@ -88,8 +88,15 @@ class MCTS:
         phi = self._calc_angle_degrees(vec_cue_to_ghost)
         return phi, dist_cue_to_ghost
 
-    def generate_heuristic_actions(self, balls, my_targets, table):
-        """生成候选动作列表"""
+    def generate_heuristic_actions(self, balls, my_targets, table, only_eight_ball=False):
+        """生成候选动作列表
+        
+        参数：
+            balls: 球状态字典
+            my_targets: 目标球列表
+            table: 球桌对象
+            only_eight_ball: 是否只生成打黑八的动作，默认关闭
+        """
         actions = []
         
         cue_ball = balls.get('cue')
@@ -97,8 +104,12 @@ class MCTS:
         cue_pos = cue_ball.state.rvw[0]
 
         # 获取所有目标球的ID
-        target_ids = [bid for bid in my_targets if balls[bid].state.s != 4]
-        
+        if only_eight_ball:
+            # 只生成打黑八的动作
+            target_ids = ['8'] if '8' in balls and balls['8'].state.s != 4 else []
+        else:
+            target_ids = [bid for bid in my_targets if balls[bid].state.s != 4]
+            
         # 如果没有目标球了（理论上外部会处理转为8号，这里兜底）
         if not target_ids:
             target_ids = ['8']
@@ -362,6 +373,10 @@ class MCTS:
         candidate_actions = self.generate_heuristic_actions(balls, player_targets[root_player], table)
         n_candidates = len(candidate_actions)
         
+        # 检查是否只剩下黑八一个待打的球
+        remaining_targets = [bid for bid in player_targets[root_player] if balls[bid].state.s != 4]
+        has_only_eight_ball = len(remaining_targets) == 1 and remaining_targets[0] == '8'
+        
         # 3. 使用模型生成policy
         state_tensor = self._state_seq_to_tensor(node.state_seq)
         state_tensor = state_tensor.unsqueeze(0).to(self.device)
@@ -400,6 +415,15 @@ class MCTS:
         # 保留指定数量的动作，默认为n_simulations/2，至少保留1个
         keep_count = max(1, int(self.n_simulations / 2))
         filtered_actions = [action for action, distance in action_distances[:keep_count]]
+        
+        # 如果只剩下黑八一个待打的球，确保生成打黑八的动作并加入
+        if has_only_eight_ball:
+            # 生成只打黑八的动作
+            eight_ball_actions = self.generate_heuristic_actions(balls, player_targets[root_player], table, only_eight_ball=True)
+            # 将打黑八的动作添加到filtered_actions中，避免重复
+            for eight_action in eight_ball_actions:
+                if eight_action not in filtered_actions:
+                    filtered_actions.append(eight_action)
         
         # 6. 对每个动作进行模拟和评估
         best_value = -float('inf')
