@@ -27,15 +27,17 @@ class ActionSampler:
 
 
 class MCTSNode:
-    def __init__(self, state_seq, parent=None, prior=1.0, phase=None):
+    def __init__(self, state_seq, parent=None, prior=1.0, phase=None, depth=0):
         """
         state_seq: List[balls_state], len == 3
         phase: 当前游戏阶段 (EARLY, MID, LATE)
+        depth: 当前节点深度
         """
         self.state_seq = state_seq
         self.parent = parent
         self.children = {}  # action_key -> MCTSNode
         self.phase = phase  # 新增：游戏阶段
+        self.depth = depth  # 新增：节点深度
 
         self.N = 0
         self.W = 0.0
@@ -78,7 +80,10 @@ class MCTS:
         c_puct=1.5,
         device="cuda" if torch.cuda.is_available() else "cpu",
         debug=False,
-        n_rollouts_per_action=1  # 每个action的模拟次数，默认3次
+        n_rollouts_per_action=1,  # 每个action的模拟次数
+        max_depth=3,  # 最大搜索深度，超过该深度不再衍生子节点
+        initial_keep_count=8,  # 初始动作保留数量
+        keep_reduction_factor=2  # 每深入一层，保留数量减半的因子
     ):
         self.model = model
         self.env = env
@@ -104,6 +109,11 @@ class MCTS:
         self.action_min = np.array([0.5, 0.0, 0.0, -0.5, -0.5], dtype=np.float32)
         self.action_max = np.array([8.0, 360.0, 90.0, 0.5, 0.5], dtype=np.float32)
         self.state_preprocessor = StatePreprocessor()
+        
+        # ===== 新增：动作生成和筛选参数 =====
+        self.max_depth = max_depth  # 最大搜索深度
+        self.initial_keep_count = initial_keep_count  # 初始动作保留数量
+        self.keep_reduction_factor = keep_reduction_factor  # 保留数量减少因子
         
         # ===== 物理校准相关参数 =====
         self.ball_radius = 0.028575  # 台球半径，用于幽灵球计算
@@ -234,8 +244,22 @@ class MCTS:
         if done:
             return 1.0 if winner == root_player else 0.0
         
-        # 2. 估算当前游戏阶段
-        phase = self._estimate_phase(balls, player_targets, root_player)
+        # 2. 检查深度限制：如果超过最大深度，不再衍生子节点，直接返回value网络结果
+        if node.depth >= self.max_depth:
+            # 只进行网络评估，不扩展子节点
+            state_tensor = self._state_seq_to_tensor(node.state_seq)
+            state_tensor = state_tensor.unsqueeze(0).to(self.device) 
+            
+            with torch.no_grad():
+                out = self.model(state_tensor)
+                value = out["value_output"].item()
+            
+            # 阶段感知价值调整
+            phase = self._estimate_phase(balls, player_targets, root_player)
+            phase_value_factor = self.PHASE_PARAMS[phase]["value_factor"]
+            value = value * phase_value_factor
+            
+            return value
         
         # 3. 网络评估 - 多次评估取均值
         state_tensor = self._state_seq_to_tensor(node.state_seq)
@@ -252,7 +276,10 @@ class MCTS:
         # 取多次评估的均值作为最终value
         value = np.mean(values)
         
-        # 4. 阶段感知价值调整 - 根据游戏阶段调整value的影响
+        # 4. 估算当前游戏阶段
+        phase = self._estimate_phase(balls, player_targets, root_player)
+        
+        # 5. 阶段感知价值调整 - 根据游戏阶段调整value的影响
         phase_value_factor = self.PHASE_PARAMS[phase]["value_factor"]
         value = value * phase_value_factor
         
@@ -280,80 +307,85 @@ class MCTS:
             # 我方目标球已清，但对方还有球，且黑八未进袋（不可能发生，作为兜底）
             value = min(value, 0.2)
 
-        # 3. 反归一化得到真实物理动作
-        base_action = self._denormalize_action(action_norm)
+        # 3. 反归一化得到模型输出的原始动作
+        model_action = self._denormalize_action(action_norm)
         
-        # 4. 校准策略动作，确保能打中球
-        my_targets = player_targets[root_player]
-        calibrated_action = self._calibrate_policy_action(base_action, balls, my_targets, table)
+        # 4. 基于Agent_pro原理生成候选动作并打分排序
+        pro_actions = self.generate_pro_actions(balls, player_targets[root_player], table)
         
-        # 5. 重新归一化校准后的动作，用于采样
-        # 将校准后的动作转回归一化空间
-        calibrated_action_norm = (calibrated_action - self.action_min) / (self.action_max - self.action_min)
-        calibrated_action_norm = np.clip(calibrated_action_norm, 0.0, 1.0)
-
+        # 如果没有生成pro动作，使用模型动作作为备选
+        if not pro_actions:
+            pro_actions.append((model_action, 1.0))
+        
+        # 5. 动作筛选：保留与模型动作相差较小的动作
+        # 计算每个pro动作与模型动作的距离
+        filtered_actions = []
+        for action, score in pro_actions:
+            # 计算动作距离（考虑角度和力度的加权距离）
+            # 角度差（0-180度）
+            phi_diff = abs(action[1] - model_action[1])
+            if phi_diff > 180:
+                phi_diff = 360 - phi_diff
+            
+            # 力度差
+            v0_diff = abs(action[0] - model_action[0])
+            
+            # 综合距离（角度差权重0.7，力度差权重0.3）
+            distance = (phi_diff / 180.0) * 0.7 + (v0_diff / (8.0 - 0.5)) * 0.3
+            
+            filtered_actions.append((action, score, distance))
+        
+        # 按距离排序，保留与模型动作相差较小的动作
+        filtered_actions.sort(key=lambda x: x[2])
+        
+        # 根据当前深度确定保留数量
+        current_depth = node.depth
+        # 初始保留数量，每深入一层，保留数量减半
+        keep_count = max(1, self.initial_keep_count // (self.keep_reduction_factor ** current_depth))
+        
+        # 只保留指定数量的动作
+        selected_actions = filtered_actions[:keep_count]
+        
+        # 6. 为每个选中的动作生成变种（角度微调 + 力度档位）
+        sampled_actions = []
+        for base_action, base_score, _ in selected_actions:
+            # 采样参数配置
+            angle_offsets = [-0.5, 0, 0.5]  # 角度微调范围（度）
+            
+            # 力度档位配置
+            v_base = base_action[0]  # 基础力度
+            v_offsets = [-1.0, 0.0, 1.0]  # 力度偏移
+            
+            # 生成角度和力度的组合样本
+            for angle_offset in angle_offsets:
+                for v_offset in v_offsets:
+                    # 计算新的角度（0-360度）
+                    new_phi = (base_action[1] + angle_offset) % 360
+                    
+                    # 计算新的力度（限制在0.5-8.0范围内）
+                    new_v0 = np.clip(v_base + v_offset, 0.5, 8.0)
+                    
+                    # 创建新动作，保持其他参数不变
+                    new_action = base_action.copy()
+                    new_action[0] = new_v0  # 力度
+                    new_action[1] = new_phi  # 角度
+                    
+                    sampled_actions.append(new_action)
+        
+        # 如果样本数量不足，确保至少有一个样本
+        if not sampled_actions:
+            sampled_actions.append(model_action.copy())
+        
+        # 调试信息
         if node.parent is None and self.debug:
             print("policy_norm:", action_norm)  # 调试信息
-            print("calibrated_policy_norm:", calibrated_action_norm)  # 调试信息
+            print("model_action:", model_action)  # 调试信息
             print("value:", value)         # 调试信息
-            print("base_action:", base_action)  # 调试信息
-            print("calibrated_action:", calibrated_action)  # 调试信息
-        
-        # 6. 实现新的采样策略：角度微调 + 力度档位采样
-        # 基于校准后的动作生成样本，不再使用高斯噪声
-        sampled_actions = []
-        
-        # 获取校准后的原始动作（真实物理动作，未归一化）
-        base_action = self._denormalize_action(calibrated_action_norm)
-        
-        # 采样参数配置
-        angle_offsets = [-0.5, 0, 0.5]  # 角度微调范围（度）
-        
-        # 力度档位配置（参考basic_agent_pro.py）
-        # 根据距离估算的基础力度，生成不同档位的力度
-        v_base = base_action[0]  # 基础力度
-        
-        # 根据n_samples动态调整力度档位数量
-        if self.n_action_samples <= 3:
-            # 少量样本：只采样基础力度
-            v_offsets = [0.0]
-        elif self.n_action_samples <= 6:
-            # 中等样本：基础力度、稍小、稍大
-            v_offsets = [-1.0, 0.0, 1.0]
-        else:
-            # 大量样本：多档位力度
-            v_offsets = [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0]
-        
-        # 生成角度和力度的组合样本
-        for angle_offset in angle_offsets:
-            for v_offset in v_offsets:
-                # 计算新的角度（0-360度）
-                new_phi = (base_action[1] + angle_offset) % 360
-                
-                # 计算新的力度（限制在0.5-8.0范围内）
-                new_v0 = np.clip(v_base + v_offset, 0.5, 8.0)
-                
-                # 创建新动作，保持其他参数不变
-                new_action = base_action.copy()
-                new_action[0] = new_v0  # 力度
-                new_action[1] = new_phi  # 角度
-                
-                sampled_actions.append(new_action)
-                
-                # 如果已经生成足够的样本，停止采样
-                if len(sampled_actions) >= self.n_action_samples:
-                    break
-            
-            if len(sampled_actions) >= self.n_action_samples:
-                break
-        
-        # 如果样本数量不足（例如n_samples=1），确保至少有一个样本
-        if not sampled_actions:
-            sampled_actions.append(base_action.copy())
+            print(f"Generated {len(pro_actions)} pro actions, kept {keep_count} after filtering")  # 调试信息
         
         # 5. 基于相似度构造先验
         distances = np.array(
-            [np.linalg.norm(a - base_action) for a in sampled_actions],
+            [np.linalg.norm(a - model_action) for a in sampled_actions],
             dtype=np.float32
         )
         similarities = 1.0 / (1.0 + distances)
@@ -402,12 +434,13 @@ class MCTS:
             avg_state_vec = np.mean(state_vectors, axis=0)
             new_state_seq = node.state_seq[1:] + [avg_state_vec]
             
-            # 创建子节点，传递当前阶段
+            # 创建子节点，传递当前阶段和深度
             node.children[action_key] = MCTSNode(
                 state_seq=new_state_seq,
                 parent=node,
                 prior=prior,
-                phase=phase
+                phase=phase,
+                depth=current_depth + 1  # 子节点深度+1
             )
         
         # ===== 检查并删除无效子节点 =====
@@ -555,6 +588,81 @@ class MCTS:
             return self.LATE
         else:
             return self.MID
+    
+    def generate_pro_actions(self, balls, my_targets, table):
+        """
+        基于Agent_pro原理生成候选动作并打分排序
+        
+        参数：
+            balls: 当前球状态字典
+            my_targets: 当前玩家的目标球列表
+            table: 球桌对象
+            
+        返回：
+            list: 排序后的候选动作列表，每个元素为 (action, score)
+        """
+        actions = []
+        
+        # 获取白球位置
+        cue_ball = balls.get('cue')
+        if not cue_ball:
+            return []
+        cue_pos = cue_ball.state.rvw[0]
+        
+        # 获取所有目标球的ID
+        target_ids = [bid for bid in my_targets if balls[bid].state.s != 4]
+        
+        # 如果没有目标球了（理论上外部会处理转为8号，这里兜底）
+        if not target_ids:
+            target_ids = ['8']
+        
+        # 遍历每一个目标球
+        for tid in target_ids:
+            obj_ball = balls[tid]
+            obj_pos = obj_ball.state.rvw[0]
+            
+            # 遍历每一个袋口
+            for pocket_id, pocket in table.pockets.items():
+                pocket_pos = pocket.center
+                
+                # 计算理论进球角度和距离
+                phi_ideal, dist = self._get_ghost_ball_target(cue_pos, obj_pos, pocket_pos)
+                
+                if dist > 0:  # 有效的幽灵球位置
+                    # 检查是否合法击打黑八
+                    remaining_targets = 0
+                    for target_id in my_targets:
+                        if target_id in balls and balls[target_id].state.s != 4:
+                            remaining_targets += 1
+                    
+                    # 如果目标是黑八且仍有其他目标球未进袋，跳过
+                    if tid == '8' and remaining_targets > 0:
+                        continue
+                    
+                    # 根据距离估算力度 (参考basic_agent_pro.py)
+                    v_base = 1.5 + dist * 1.5
+                    v_base = np.clip(v_base, 1.0, 6.0)
+                    
+                    # 生成几个变种动作加入候选池
+                    # 变种1：精准一击
+                    action1 = np.array([v_base, phi_ideal, 0, 0, 0], dtype=np.float32)
+                    actions.append((action1, 1.0))  # 基础分数
+                    
+                    # 变种2：力度稍大
+                    action2 = np.array([min(v_base + 1.5, 7.5), phi_ideal, 0, 0, 0], dtype=np.float32)
+                    actions.append((action2, 0.9))  # 稍低分数
+                    
+                    # 变种3：角度微调 (左右偏移 0.5 度)
+                    action3 = np.array([v_base, (phi_ideal + 0.5) % 360, 0, 0, 0], dtype=np.float32)
+                    actions.append((action3, 0.85))  # 稍低分数
+                    
+                    action4 = np.array([v_base, (phi_ideal - 0.5) % 360, 0, 0, 0], dtype=np.float32)
+                    actions.append((action4, 0.85))  # 稍低分数
+        
+        # 按分数降序排序
+        actions.sort(key=lambda x: x[1], reverse=True)
+        
+        return actions
     
     def _calc_angle_degrees(self, v):
         """
