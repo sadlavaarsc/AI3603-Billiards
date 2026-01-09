@@ -418,23 +418,7 @@ class MCTS:
                 phase=phase,
                 depth=current_depth + 1  # 子节点深度+1
             )
-        
-        # ===== 检查并删除无效子节点 =====
-        # 保存原始状态向量，用于比较
-        original_state_vec = node.state_seq[-1]
-        
-        # 找出无效子节点（状态没有变化，说明犯规了）
-        invalid_keys = []
-        for action_key, child in node.children.items():
-            child_state_vec = child.state_seq[-1]
-            # 如果状态向量几乎没有变化，说明该动作导致了犯规（状态被恢复）
-            if np.allclose(child_state_vec, original_state_vec, atol=1e-6):
-                invalid_keys.append(action_key)
-        
-        # 删除无效子节点
-        for key in invalid_keys:
-            del node.children[key]
-        
+            
         return value
 
     def _backpropagate(self, node, value):
