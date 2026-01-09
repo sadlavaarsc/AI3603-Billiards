@@ -357,7 +357,28 @@ class MCTS:
 
     def _expand_and_evaluate(self, node, balls, table, player_targets, root_player, depth, remaining_hits):
         """扩展节点并评估"""
-        # 1. 检查深度限制，不超过剩余杆数
+        # 1. 检查是否已经处于输了的状态
+        # 检查白球是否进袋
+        cue_ball = balls.get('cue')
+        cue_in_pocket = cue_ball and cue_ball.state.s == 4
+        
+        # 检查黑八是否进袋
+        eight_ball = balls.get('8')
+        eight_in_pocket = eight_ball and eight_ball.state.s == 4
+        
+        # 检查自己的目标球是否都已经进袋（除了黑八）
+        my_targets = player_targets[root_player]
+        non_eight_targets = [bid for bid in my_targets if bid != '8']
+        has_non_eight_targets_left = any(bid in balls and balls[bid].state.s != 4 for bid in non_eight_targets)
+        
+        # 输的情况：
+        # 1. 白球和黑八同时进袋
+        # 2. 黑八进袋但自己还有非黑八目标球未进
+        # 3. 白球进袋且黑八也进袋
+        if (cue_in_pocket and eight_in_pocket) or (eight_in_pocket and has_non_eight_targets_left):
+            return 0.0
+        
+        # 2. 检查深度限制，不超过剩余杆数
         if depth >= remaining_hits:
             # 只使用value network评估
             state_tensor = self._state_seq_to_tensor(node.state_seq)
