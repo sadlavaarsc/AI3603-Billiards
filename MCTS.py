@@ -255,8 +255,17 @@ class MCTS:
             is_targeting_eight_ball_legally = (len(player_targets) == 1 and player_targets[0] == "8")
             score += 150 if is_targeting_eight_ball_legally else -500
                 
+        # 特殊规则：当只剩黑八一个球但是还选择打别人的球时，给一个较小的惩罚
+        only_eight_ball_left = (len(player_targets) == 1 and player_targets[0] == "8")
+        hit_wrong_ball_when_only_eight = only_eight_ball_left and first_contact_ball_id is not None and first_contact_ball_id != "8"
+        
         if foul_first_hit:
-            score -= 30
+            # 如果是特殊情况，给较小的惩罚
+            if hit_wrong_ball_when_only_eight:
+                score -= 15  # 较小的惩罚
+            else:
+                score -= 30  # 正常惩罚
+        
         if foul_no_rail:
             score -= 30
             
