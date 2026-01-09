@@ -423,8 +423,9 @@ class MCTS:
             depth_factor = depth / self.max_depth  # 0-1，深度越深，value network权重越大
             value = depth_factor * value_output + (1 - depth_factor) * normalized_reward
             
-            # 递归扩展子节点
-            if shot is not None:
+            # 递归扩展子节点：只有当不是直接输掉的情况才扩展
+            # raw_reward=-500表示直接输掉，normalized_reward<0.1表示接近输掉
+            if shot is not None and raw_reward != -500 and normalized_reward > 0.1:
                 # 生成新的状态向量
                 new_balls_state = {bid: ball for bid, ball in shot.balls.items()}
                 # 使用_balls_state_to_81方法将balls_state转换为81维向量
