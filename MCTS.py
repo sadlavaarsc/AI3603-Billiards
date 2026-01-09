@@ -4,28 +4,6 @@ import torch
 import poolenv
 from data_loader import StatePreprocessor
 
-
-class ActionSampler:
-    """
-    在【归一化动作空间 [0,1]】附近采样
-    """
-    def __init__(self, sigma_norm=None):
-        # 归一化空间噪声（经验值）
-        # 增大力度维度(V0)的噪声标准差，从0.08增加到0.2，改善力度控制
-        self.sigma_norm = sigma_norm or np.array(
-            [0.2, 0.08, 0.08, 0.05, 0.05],
-            dtype=np.float32
-        )
-
-    def sample(self, base_action_norm, n_samples = 8):
-        actions = []
-        for _ in range(n_samples):
-            noise = np.random.normal(0, self.sigma_norm)
-            a_norm = np.clip(base_action_norm + noise, 0.0, 1.0)
-            actions.append(a_norm)
-        return actions
-
-
 class MCTSNode:
     def __init__(self, state_seq, parent=None, prior=1.0, phase=None, depth=0):
         """
@@ -65,7 +43,6 @@ class MCTSNode:
         
         return self.Q + adjusted_c_puct * self.P * np.sqrt(self.parent.N) / (1 + self.N)
 
-
 class MCTS:
     """
     Policy-guided Continuous MCTS for PoolEnv
@@ -95,7 +72,7 @@ class MCTS:
         self.n_rollouts_per_action = n_rollouts_per_action  # 添加每个action的模拟次数参数
 
         self.PRIOR_THRESHOLD=0.02
-        self.MAX_EXPAND=8
+        self.MAX_EXPAND=max_depth*initial_keep_count  # 最大展开节点数，等于最大搜索深度*初始保留数量
 
         # 添加噪声参数，与BasicAgentPro保持一致
         # 定义噪声水平 (与 poolenv 保持一致或略大)
@@ -701,119 +678,6 @@ class MCTS:
         phi = self._calc_angle_degrees(vec_cue_to_ghost)
         return phi, dist_cue_to_ghost
     
-    def _calibrate_policy_action(self, action, balls, my_targets, table):
-        """
-        校准策略网络输出的动作，确保能打中球且不犯规
-        同时考虑角度和力度的矫正
-        
-        参数：
-            action: 策略网络输出的动作（归一化前的真实物理动作）
-            balls: 当前球状态字典
-            my_targets: 当前玩家的目标球列表
-            table: 球桌对象
-            
-        返回：
-            np.array: 校准后的动作，包含角度和力度的矫正
-        """
-        import numpy as np
-        
-        # 获取白球位置
-        cue_ball = balls.get('cue')
-        if not cue_ball:
-            return action  # 没有白球，无法校准，返回原始动作
-        cue_pos = cue_ball.state.rvw[0]
-        
-        # 获取所有目标球的ID
-        target_ids = [bid for bid in my_targets if balls[bid].state.s != 4]
-        
-        # 如果没有目标球了（理论上外部会处理转为8号，这里兜底）
-        if not target_ids:
-            target_ids = ['8']
-        
-        # 获取所有袋口位置
-        pocket_positions = [pocket.center for pocket in table.pockets.values()]
-        
-        # 计算所有可能的幽灵球目标角度和距离，确保不犯规且不提前打黑八
-        valid_ghost_targets = []
-        for tid in target_ids:
-            obj_ball = balls[tid]
-            obj_pos = obj_ball.state.rvw[0]
-            
-            for pocket_pos in pocket_positions:
-                phi_ideal, dist = self._get_ghost_ball_target(cue_pos, obj_pos, pocket_pos)
-                if dist > 0:  # 有效的幽灵球位置
-                    # 排除未清台前打黑八的情况：如果目标是黑八且仍有其他目标球，跳过
-                    # 检查实际剩余的目标球数（不包括已进袋的）
-                    remaining_targets = 0
-                    for target_id in my_targets:
-                        if target_id in balls and balls[target_id].state.s != 4:
-                            remaining_targets += 1
-                    
-                    # 如果目标是黑八且仍有其他目标球未进袋，跳过
-                    if tid == '8' and remaining_targets > 0:
-                        continue
-                    
-                    # 根据距离估算合适的力度
-                    v_base = 1.5 + dist * 1.5
-                    v_base = np.clip(v_base, 1.0, 6.0)
-                    
-                    valid_ghost_targets.append((phi_ideal, v_base, dist, tid))
-        
-        if not valid_ghost_targets:
-            return action  # 没有有效的幽灵球位置，使用模型原始输出
-        
-        # 计算原始动作的角度和力度
-        original_phi = action[1]  # action的第二个元素是phi角度
-        original_v0 = action[0]   # action的第一个元素是力度
-        
-        # 找到与原始动作最接近的幽灵球目标（同时考虑角度和力度）
-        min_cost = float('inf')
-        best_phi = original_phi
-        best_v0 = original_v0
-        found_valid = False
-        
-        # 计算每个幽灵球目标与原始动作的综合成本
-        sorted_ghost_targets = []
-        for ghost_phi, ghost_v0, dist, tid in valid_ghost_targets:
-            # 角度差（0-180度）
-            phi_diff = abs(ghost_phi - original_phi)
-            if phi_diff > 180:
-                phi_diff = 360 - phi_diff
-            
-            # 力度差（归一化到0-1）
-            v0_diff = abs(ghost_v0 - original_v0) / (8.0 - 0.5)  # 力度范围0.5-8.0
-            
-            # 综合成本（角度差权重更高，力度差权重次之）
-            # 角度差转换为0-1范围（180度=1）
-            cost = (phi_diff / 180.0) * 0.7 + v0_diff * 0.3
-            
-            sorted_ghost_targets.append((cost, ghost_phi, ghost_v0, dist, tid))
-        
-        # 按综合成本从小到大排序
-        sorted_ghost_targets.sort(key=lambda x: x[0])
-        
-        # 选择第一个有效的幽灵球目标（综合成本最低且不犯规）
-        for cost, ghost_phi, ghost_v0, dist, tid in sorted_ghost_targets:
-            # 检查该目标是否合法
-            if tid in my_targets or (len(my_targets) == 0 and tid == '8'):
-                best_phi = ghost_phi
-                best_v0 = ghost_v0
-                found_valid = True
-                break
-        
-        # 如果没有找到有效目标（理论上不会发生），使用模型原始输出
-        if not found_valid:
-            return action
-        
-        # 校准动作的角度和力度为最接近的合法幽灵球目标
-        calibrated_action = action.copy()
-        calibrated_action[1] = best_phi  # 校准角度
-        calibrated_action[0] = best_v0    # 校准力度
-        
-        return calibrated_action
-
-
-
     def _check_foul(self, shot, last_state, player_targets, current_player):
         """
         检查击球是否犯规（完全对齐台球规则）
