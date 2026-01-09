@@ -353,8 +353,9 @@ class MCTS:
         if not sampled_actions:
             sampled_actions.append(model_action.copy())
         
-        # 调试信息
-        if node.parent is None and self.debug:
+        # 调试信息：只在根节点且是第一次模拟时打印
+        # 通过检查节点深度和子节点数量来判断是否是第一次模拟
+        if node.parent is None and self.debug and len(node.children) == 0:
             print("policy_norm:", action_norm)  # 调试信息
             print("model_action:", model_action)  # 调试信息
             print("value:", value)         # 调试信息
