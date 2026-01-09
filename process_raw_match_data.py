@@ -110,7 +110,7 @@ def filter_shot(shot, shot_index, match_data):
             # 如果打中了己方球或打进了己方球，返回True（保留）
             if result.get('ME_INTO_POCKET', []) or not result.get('FOUL_FIRST_HIT', False):
                 return True
-        
+        '''
         # 2. 保留己方只剩下黑八没有打中，且这回合动作之后打进了黑八
         pre_state = shot['pre_state']
         my_targets = pre_state['my_targets']
@@ -121,7 +121,7 @@ def filter_shot(shot, shot_index, match_data):
             # 检查是否打进了黑八
             if '8' in result.get('ME_INTO_POCKET', []):
                 return True
-        
+        '''
         # 其他情况都删掉
         return False
     except Exception as e:
@@ -147,11 +147,15 @@ def process_single_match(match_file, enable_filter=False):
             recent_states = []
 
             for i, shot in enumerate(shots):
+                # 初始化可能用到的变量，避免未定义
+                player = pre_state = balls = my_targets = action = None
+                current_state = states = action_vector = value = None
+
                 try:
                     # 应用过滤器
                     if enable_filter and not filter_shot(shot, i, match_data):
                         continue
-                    
+
                     player = shot['player']
                     pre_state = shot['pre_state']
                     balls = pre_state['balls']
@@ -209,9 +213,11 @@ def process_single_match(match_file, enable_filter=False):
                     print(f"警告：shot {i} 缺少字段 {e}，跳过")
                     continue
                 finally:
-                    # 及时释放shot级别的临时变量
-                    del shot, player, pre_state, balls, my_targets, action
-                    del current_state, states, action_vector, value
+                    # 安全删除变量：只删除已定义且非None的变量
+                    for var_name in ['shot', 'player', 'pre_state', 'balls', 'my_targets', 'action',
+                                     'current_state', 'states', 'action_vector', 'value']:
+                        if locals().get(var_name) is not None:
+                            del locals()[var_name]
 
             # 释放对局级别的变量
             del match_data, winner, shots, recent_states
@@ -219,6 +225,7 @@ def process_single_match(match_file, enable_filter=False):
 
     except Exception as e:
         print(f"错误：处理文件 {match_file} 时出错 - {e}")
+        raise e
     finally:
         gc.collect()
 
