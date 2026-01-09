@@ -52,7 +52,7 @@ class MCTS:
                  model,
                  n_simulations=50,
                  c_puct=1.414,
-                 max_depth=3,
+                 max_depth=4,
                  device="cuda" if torch.cuda.is_available() else "cpu"):
         self.model = model
         self.n_simulations = n_simulations
@@ -425,7 +425,7 @@ class MCTS:
             
             # 递归扩展子节点：只有当不是直接输掉的情况才扩展
             # raw_reward=-500表示直接输掉，normalized_reward<0.1表示接近输掉
-            if shot is not None and raw_reward != -500 and normalized_reward > 0.1:
+            if shot is not None and raw_reward > -500 and normalized_reward > 0:
                 # 生成新的状态向量
                 new_balls_state = {bid: ball for bid, ball in shot.balls.items()}
                 # 使用_balls_state_to_81方法将balls_state转换为81维向量
