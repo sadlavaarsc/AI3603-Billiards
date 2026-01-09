@@ -130,11 +130,11 @@ class MCTS:
 
                 action_key, node = items[idx]
                 
-                # 使用save/restore机制替代deepcopy，优化性能
+                # 3. 执行动作，使用simulate_action方法直接模拟，不依赖环境
                 sim_balls = poolenv.restore_balls_state(original_balls)
                 
                 # 3. 执行动作，使用simulate_action方法直接模拟，不依赖环境
-                new_balls = self._simulate_action(sim_balls, table, action_key)
+                new_balls = self._simulate_action(sim_balls, table, action_key, player_targets, root_player)
                 original_balls = poolenv.save_balls_state(new_balls)
 
             # -------- 2. Expansion + Evaluation --------
@@ -247,7 +247,7 @@ class MCTS:
             for _ in range(self.n_rollouts_per_action):
                 # 使用_simulate_action直接模拟动作，不依赖env对象
                 sim_balls = poolenv.restore_balls_state(balls)
-                new_balls = self._simulate_action(sim_balls, table, action_key)
+                new_balls = self._simulate_action(sim_balls, table, action_key, player_targets, root_player)
                 
                 # 生成新的状态向量
                 new_balls_state = poolenv.save_balls_state(new_balls)
@@ -385,13 +385,15 @@ class MCTS:
 
 
 
-    def _check_foul(self, shot, last_state):
+    def _check_foul(self, shot, last_state, player_targets, current_player):
         """
         检查击球是否犯规
         
         参数：
             shot: 已完成物理模拟的System对象
             last_state: 击球前的球状态字典
+            player_targets: 玩家目标球字典，{player: [target_ball_ids]}
+            current_player: 当前击球玩家，'A'或'B'
             
         返回：
             bool: True表示犯规，False表示合法
@@ -427,7 +429,18 @@ class MCTS:
                 if first_contact_ball_id is not None and first_contact_ball_id in ids:
                     target_hit_cushion = True
         
-        # 4. 犯规判断
+        # 4. 玩家目标球分析
+        my_targets = player_targets[current_player]
+        my_remaining = [bid for bid in my_targets if last_state[bid].state.s != 4]
+        
+        # 对手球分析
+        opponent_player = 'B' if current_player == 'A' else 'A'
+        opponent_targets = player_targets[opponent_player]
+        
+        # 定义对手球和黑8的集合（当有目标球剩余时）
+        opponent_plus_eight = set(opponent_targets) | {'8'}
+        
+        # 5. 犯规判断
         # 白球进袋
         if cue_pocketed:
             return True
@@ -444,9 +457,21 @@ class MCTS:
         if len(new_pocketed) == 0 and first_contact_ball_id is not None and (not cue_hit_cushion) and (not target_hit_cushion):
             return True
         
+        # 新增：当有目标球剩余时，首次碰撞黑八（误打黑八）
+        if len(my_remaining) > 0 and first_contact_ball_id == '8':
+            return True
+        
+        # 新增：当有目标球剩余时，首次碰撞对手球
+        if len(my_remaining) > 0 and first_contact_ball_id in opponent_targets:
+            return True
+        
+        # 新增：当只剩黑八时，首次碰撞非黑八球
+        if len(my_remaining) == 0 and first_contact_ball_id != '8':
+            return True
+        
         return False
 
-    def _simulate_action(self, balls, table, action_key):
+    def _simulate_action(self, balls, table, action_key, player_targets, current_player):
         """
         直接模拟击球动作，添加高斯噪声和完整的犯规检查
         
@@ -454,6 +479,8 @@ class MCTS:
             balls: 球状态字典，{ball_id: Ball对象}
             table: 球桌对象
             action_key: 动作元组，(V0, phi, theta, a, b)
+            player_targets: 玩家目标球字典，{player: [target_ball_ids]}
+            current_player: 当前击球玩家，'A'或'B'
         
         返回：
             模拟后的球状态字典
@@ -501,7 +528,7 @@ class MCTS:
             return balls
         
         # 检查是否犯规
-        if self._check_foul(shot, last_state):
+        if self._check_foul(shot, last_state, player_targets, current_player):
             return balls
         
         return shot.balls
