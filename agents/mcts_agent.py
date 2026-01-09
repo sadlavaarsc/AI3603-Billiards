@@ -31,6 +31,12 @@ class MCTSAgent(Agent):
         self.state_buffer = collections.deque(maxlen=3)
         self.n_simulations = n_simulations
         self.n_action_samples = n_action_samples
+        self.hit_count = 0  # 新增：内部击球计数器，用于跟踪比赛进程
+    
+    def clear_buffer(self):
+        """清空状态缓冲区并重置击球计数器"""
+        self.state_buffer.clear()
+        self.hit_count = 0  # 重置击球计数器
     
     def set_env(self, env):
         """设置环境"""
@@ -102,7 +108,13 @@ class MCTSAgent(Agent):
         else:
             self.state_buffer.append(state_vec)
         state_seq = list(self.state_buffer)
+        
+        # 调用 MCTS 搜索获取动作
         action = self.mcts.search(state_seq)
+        
+        # 递增击球计数器
+        self.hit_count += 1
+        
         return {
             "V0": float(action[0]),
             "phi": float(action[1]),

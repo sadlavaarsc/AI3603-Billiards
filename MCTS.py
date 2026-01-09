@@ -27,23 +27,41 @@ class ActionSampler:
 
 
 class MCTSNode:
-    def __init__(self, state_seq, parent=None, prior=1.0):
+    def __init__(self, state_seq, parent=None, prior=1.0, phase=None):
         """
         state_seq: List[balls_state], len == 3
+        phase: 当前游戏阶段 (EARLY, MID, LATE)
         """
         self.state_seq = state_seq
         self.parent = parent
         self.children = {}  # action_key -> MCTSNode
+        self.phase = phase  # 新增：游戏阶段
 
         self.N = 0
         self.W = 0.0
         self.Q = 0.0
         self.P = prior
 
-    def ucb(self, c_puct=1.5):
+    def ucb(self, c_puct=1.5, phase_params=None):
+        """
+        计算UCB值，支持阶段感知调整
+        
+        参数：
+            c_puct: 基础探索参数
+            phase_params: 阶段参数字典，包含不同阶段的cpuct调整因子
+            
+        返回：
+            float: UCB值
+        """
         if self.N == 0:
             return float("inf")
-        return self.Q + c_puct * self.P * np.sqrt(self.parent.N) / (1 + self.N)
+        
+        # 使用阶段调整后的c_puct
+        adjusted_c_puct = c_puct
+        if phase_params and self.phase:
+            adjusted_c_puct = c_puct * phase_params[self.phase]["cpuct"]
+        
+        return self.Q + adjusted_c_puct * self.P * np.sqrt(self.parent.N) / (1 + self.N)
 
 
 class MCTS:
@@ -86,6 +104,19 @@ class MCTS:
         self.action_min = np.array([0.5, 0.0, 0.0, -0.5, -0.5], dtype=np.float32)
         self.action_max = np.array([8.0, 360.0, 90.0, 0.5, 0.5], dtype=np.float32)
         self.state_preprocessor = StatePreprocessor()
+        
+        # ===== 阶段感知（Game-Phase Aware）相关参数 =====
+        # 阶段常量定义
+        self.EARLY = "EARLY"
+        self.MID = "MID"
+        self.LATE = "LATE"
+        
+        # 阶段参数集中管理
+        self.PHASE_PARAMS = {
+            self.EARLY: {"value_factor": 0.7, "cpuct": 1.2},  # 开局：降低价值影响，增加探索
+            self.MID: {"value_factor": 1.0, "cpuct": 1.0},    # 中盘：正常参数
+            self.LATE: {"value_factor": 1.4, "cpuct": 0.7}    # 终盘：放大价值影响，减少探索
+        }
 
     # ------------------------------------------------------------------
     # 公共接口
@@ -97,6 +128,10 @@ class MCTS:
         """
         root = MCTSNode(state_seq)
         root_player = self.env.get_curr_player()
+        
+        # 估算根节点的游戏阶段
+        balls_state = poolenv.restore_balls_state(poolenv.save_balls_state(self.env.balls))
+        root.phase = self._estimate_phase(balls_state, self.env.player_targets, root_player)
 
         for _ in range(self.n_simulations):
             node = root
@@ -114,7 +149,7 @@ class MCTS:
             while node.children:
                 items = list(node.children.items())
                 ucbs = np.array(
-                    [child.ucb(self.c_puct) for _, child in items],
+                    [child.ucb(self.c_puct, self.PHASE_PARAMS) for _, child in items],
                     dtype=np.float32
                 )
 
@@ -177,7 +212,10 @@ class MCTS:
         if done:
             return 1.0 if winner == root_player else 0.0
         
-        # 2. 网络评估 - 多次评估取均值
+        # 2. 估算当前游戏阶段
+        phase = self._estimate_phase(balls, player_targets, root_player)
+        
+        # 3. 网络评估 - 多次评估取均值
         state_tensor = self._state_seq_to_tensor(node.state_seq)
         state_tensor = state_tensor.unsqueeze(0).to(self.device) 
         
@@ -191,6 +229,34 @@ class MCTS:
         
         # 取多次评估的均值作为最终value
         value = np.mean(values)
+        
+        # 4. 阶段感知价值调整 - 根据游戏阶段调整value的影响
+        phase_value_factor = self.PHASE_PARAMS[phase]["value_factor"]
+        value = value * phase_value_factor
+        
+        # 5. 终局启发式价值兜底 - 当只剩黑八时
+        my_targets = player_targets[root_player]
+        remaining_targets = 0
+        for ball_id in my_targets:
+            if ball_id in balls and balls[ball_id].state.s != 4:
+                remaining_targets += 1
+        
+        # 只剩黑八，且黑八未进袋
+        if remaining_targets == 0 and '8' in balls and balls['8'].state.s != 4:
+            # 终局阶段，黑八在台面上，给一个较高的启发式价值
+            value = max(value, 0.8)  # 确保终局有足够的价值激励
+        
+        # 6. 明显必败局面（如只剩对方球）
+        opponent_player = 'B' if root_player == 'A' else 'A'
+        opponent_targets = player_targets[opponent_player]
+        opponent_remaining = 0
+        for ball_id in opponent_targets:
+            if ball_id in balls and balls[ball_id].state.s != 4:
+                opponent_remaining += 1
+        
+        if remaining_targets == 0 and opponent_remaining > 0:
+            # 我方目标球已清，但对方还有球，且黑八未进袋（不可能发生，作为兜底）
+            value = min(value, 0.2)
 
         # 3. 反归一化得到真实物理动作
         base_action = self._denormalize_action(action_norm)
@@ -262,11 +328,12 @@ class MCTS:
             avg_state_vec = np.mean(state_vectors, axis=0)
             new_state_seq = node.state_seq[1:] + [avg_state_vec]
             
-            # 创建子节点
+            # 创建子节点，传递当前阶段
             node.children[action_key] = MCTSNode(
                 state_seq=new_state_seq,
                 parent=node,
-                prior=prior
+                prior=prior,
+                phase=phase
             )
         
         # ===== 检查并删除无效子节点 =====
@@ -382,6 +449,38 @@ class MCTS:
         states = np.stack(state_seq, axis=0)   # ← 关键
         states = self.state_preprocessor(states)
         return torch.from_numpy(states).float()
+
+    def _estimate_phase(self, balls_state, player_targets, current_player):
+        """
+        估算当前游戏阶段
+        
+        参数：
+            balls_state: 球状态字典
+            player_targets: 玩家目标球字典
+            current_player: 当前玩家
+            
+        返回：
+            str: 游戏阶段 (EARLY, MID, LATE)
+        """
+        # 计算当前玩家剩余的目标球数
+        my_targets = player_targets[current_player]
+        remaining_balls = 0
+        
+        for ball_id in my_targets:
+            if ball_id in balls_state and balls_state[ball_id].state.s != 4:  # 4表示已进袋
+                remaining_balls += 1
+        
+        # 检查是否只剩下黑八
+        if remaining_balls == 0 and '8' in balls_state and balls_state['8'].state.s != 4:
+            return self.LATE
+        
+        # 根据剩余球数判断阶段
+        if remaining_balls > 8:
+            return self.EARLY
+        elif remaining_balls <= 3:
+            return self.LATE
+        else:
+            return self.MID
 
 
 
