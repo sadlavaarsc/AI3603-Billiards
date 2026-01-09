@@ -564,7 +564,7 @@ class MCTS:
         # 获取所有袋口位置
         pocket_positions = [pocket.center for pocket in table.pockets.values()]
         
-        # 计算所有可能的幽灵球目标角度，确保不犯规
+        # 计算所有可能的幽灵球目标角度，确保不犯规且不提前打黑八
         valid_ghost_angles = []
         for tid in target_ids:
             obj_ball = balls[tid]
@@ -573,6 +573,16 @@ class MCTS:
             for pocket_pos in pocket_positions:
                 phi_ideal, dist = self._get_ghost_ball_target(cue_pos, obj_pos, pocket_pos)
                 if dist > 0:  # 有效的幽灵球位置
+                    # 排除未清台前打黑八的情况：如果目标是黑八且仍有其他目标球，跳过
+                    # 检查实际剩余的目标球数（不包括已进袋的）
+                    remaining_targets = 0
+                    for target_id in my_targets:
+                        if target_id in balls and balls[target_id].state.s != 4:
+                            remaining_targets += 1
+                    
+                    # 如果目标是黑八且仍有其他目标球未进袋，跳过
+                    if tid == '8' and remaining_targets > 0:
+                        continue
                     valid_ghost_angles.append((phi_ideal, tid))
         
         if not valid_ghost_angles:
