@@ -9,7 +9,7 @@ from data_loader import StatePreprocessor
 class MCTSAgent(Agent):
     """基于 MCTS 的智能 Agent"""
     
-    def __init__(self, model=None, env=None, n_simulations=30, n_action_samples=8, device="cuda" if torch.cuda.is_available() else "cpu", debug=True):
+    def __init__(self, model=None, env=None, n_simulations=30, device="cuda" if torch.cuda.is_available() else "cpu", debug=True):
         super().__init__()
         self.env = env
         self.device = device
@@ -19,18 +19,14 @@ class MCTSAgent(Agent):
         if model is not None and env is not None:
             self.mcts = MCTS(
                 model=model,
-                env=env,
                 n_simulations=n_simulations,
-                n_action_samples=n_action_samples,
-                device=device,
-                debug=debug
+                device=device
             )
         else:
             self.mcts = None
         
         self.state_buffer = collections.deque(maxlen=3)
         self.n_simulations = n_simulations
-        self.n_action_samples = n_action_samples
         self.hit_count = 0  # 新增：内部击球计数器，用于跟踪比赛进程
     
     def clear_buffer(self):
@@ -44,11 +40,8 @@ class MCTSAgent(Agent):
         if self.model is not None:
             self.mcts = MCTS(
                 model=self.model,
-                env=env,
                 n_simulations=self.n_simulations,
-                n_action_samples=self.n_action_samples,
-                device=self.device,
-                debug=self.debug
+                device=self.device
             )
     
     def set_model(self, model):
@@ -57,11 +50,8 @@ class MCTSAgent(Agent):
         if self.env is not None:
             self.mcts = MCTS(
                 model=model,
-                env=self.env,
                 n_simulations=self.n_simulations,
-                n_action_samples=self.n_action_samples,
-                device=self.device,
-                debug=self.debug
+                device=self.device
             )
     
     def load_model(self, model_path):
@@ -82,11 +72,7 @@ class MCTSAgent(Agent):
         if self.mcts is not None:
             self.mcts.n_simulations = n_simulations
     
-    def set_action_samples(self, n_action_samples):
-        """设置动作采样数量"""
-        self.n_action_samples = n_action_samples
-        if self.mcts is not None:
-            self.mcts.n_action_samples = n_action_samples
+
     
     def decision(self, balls_state, my_targets=None, table=None):
         """使用 MCTS 进行决策
@@ -110,7 +96,7 @@ class MCTSAgent(Agent):
         state_seq = list(self.state_buffer)
         
         # 调用 MCTS 搜索获取动作
-        action = self.mcts.search(state_seq)
+        action = self.mcts.search(state_seq, balls_state, table, self.env.player_targets, self.env.get_curr_player())
         
         # 递增击球计数器
         self.hit_count += 1
