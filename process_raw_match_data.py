@@ -90,8 +90,53 @@ def stream_json_file(file_path):
                 print(f"警告：文件 {file_path} 格式错误，跳过")
 
 
-def process_single_match(match_file):
-    """处理单个对局数据文件，生成可训练数据（纯流式）"""
+def filter_shot(shot, shot_index, match_data):
+    """
+    过滤样本的函数
+    
+    参数：
+        shot: 当前处理的shot
+        shot_index: shot在对局中的索引
+        match_data: 整个对局数据
+    
+    返回：
+        bool: True表示样本应该被保留，False表示样本应该被过滤掉
+    """
+    try:
+        # 1. 保留整场比赛第一杆，且这一杆是有效杆（打中了己方球，甚至打进了己方球）
+        if shot_index == 0:
+            # 检查是否是有效杆
+            result = shot.get('result', {})
+            # 如果打中了己方球或打进了己方球，返回True（保留）
+            if result.get('ME_INTO_POCKET', []) or not result.get('FOUL_FIRST_HIT', False):
+                return True
+        
+        # 2. 保留己方只剩下黑八没有打中，且这回合动作之后打进了黑八
+        pre_state = shot['pre_state']
+        my_targets = pre_state['my_targets']
+        result = shot.get('result', {})
+        
+        # 检查是否只剩下黑八
+        if len(my_targets) == 1 and my_targets[0] == '8':
+            # 检查是否打进了黑八
+            if '8' in result.get('ME_INTO_POCKET', []):
+                return True
+        
+        # 其他情况都删掉
+        return False
+    except Exception as e:
+        print(f"警告：过滤样本时出错 - {e}，保留该样本")
+        return True
+
+
+def process_single_match(match_file, enable_filter=False):
+    """
+    处理单个对局数据文件，生成可训练数据（纯流式）
+    
+    参数：
+        match_file: 对局数据文件路径
+        enable_filter: 是否启用样本过滤
+    """
     try:
         # 流式读取JSON数据
         for match_data in stream_json_file(match_file):
@@ -103,6 +148,10 @@ def process_single_match(match_file):
 
             for i, shot in enumerate(shots):
                 try:
+                    # 应用过滤器
+                    if enable_filter and not filter_shot(shot, i, match_data):
+                        continue
+                    
                     player = shot['player']
                     pre_state = shot['pre_state']
                     balls = pre_state['balls']
@@ -174,8 +223,15 @@ def process_single_match(match_file):
         gc.collect()
 
 
-def process_match_data(match_dir, output_file):
-    """处理多个对局数据文件，流式写入输出"""
+def process_match_data(match_dir, output_file, enable_filter=False):
+    """
+    处理多个对局数据文件，流式写入输出
+    
+    参数：
+        match_dir: 对局数据目录
+        output_file: 输出文件路径
+        enable_filter: 是否启用样本过滤
+    """
     match_files = load_match_files(match_dir)
     total_samples = 0
     first_sample = True
@@ -185,7 +241,7 @@ def process_match_data(match_dir, output_file):
         f.write('[\n')
 
         for match_file in tqdm(match_files, desc="Processing match files"):
-            generator = process_single_match(match_file)
+            generator = process_single_match(match_file, enable_filter)
 
             for sample in generator:
                 try:
@@ -216,18 +272,23 @@ def process_match_data(match_dir, output_file):
 
 
 def main():
+    """
+    主函数
+    """
     parser = argparse.ArgumentParser(
         description="Process match data to generate trainable data")
     parser.add_argument('--match_dir', type=str, default='match_data',
                         help='Directory containing match data files')
     parser.add_argument('--output_file', type=str, default='trainable_data.json',
                         help='Output file path for trainable data')
+    parser.add_argument('--enable_filter', action='store_true', default=False,
+                        help='Enable sample filtering')
 
     args = parser.parse_args()
 
     # 强制开启垃圾回收
     gc.enable()
-    process_match_data(args.match_dir, args.output_file)
+    process_match_data(args.match_dir, args.output_file, args.enable_filter)
 
 
 if __name__ == '__main__':
