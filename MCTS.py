@@ -536,6 +536,7 @@ class MCTS:
     def _calibrate_policy_action(self, action, balls, my_targets, table):
         """
         校准策略网络输出的动作，确保能打中球且不犯规
+        同时考虑角度和力度的矫正
         
         参数：
             action: 策略网络输出的动作（归一化前的真实物理动作）
@@ -544,7 +545,7 @@ class MCTS:
             table: 球桌对象
             
         返回：
-            np.array: 校准后的动作
+            np.array: 校准后的动作，包含角度和力度的矫正
         """
         import numpy as np
         
@@ -564,8 +565,8 @@ class MCTS:
         # 获取所有袋口位置
         pocket_positions = [pocket.center for pocket in table.pockets.values()]
         
-        # 计算所有可能的幽灵球目标角度，确保不犯规且不提前打黑八
-        valid_ghost_angles = []
+        # 计算所有可能的幽灵球目标角度和距离，确保不犯规且不提前打黑八
+        valid_ghost_targets = []
         for tid in target_ids:
             obj_ball = balls[tid]
             obj_pos = obj_ball.state.rvw[0]
@@ -583,45 +584,63 @@ class MCTS:
                     # 如果目标是黑八且仍有其他目标球未进袋，跳过
                     if tid == '8' and remaining_targets > 0:
                         continue
-                    valid_ghost_angles.append((phi_ideal, tid))
+                    
+                    # 根据距离估算合适的力度
+                    v_base = 1.5 + dist * 1.5
+                    v_base = np.clip(v_base, 1.0, 6.0)
+                    
+                    valid_ghost_targets.append((phi_ideal, v_base, dist, tid))
         
-        if not valid_ghost_angles:
+        if not valid_ghost_targets:
             return action  # 没有有效的幽灵球位置，使用模型原始输出
         
-        # 计算原始动作的角度
+        # 计算原始动作的角度和力度
         original_phi = action[1]  # action的第二个元素是phi角度
+        original_v0 = action[0]   # action的第一个元素是力度
         
-        # 找到与原始角度最接近且不犯规的幽灵球角度
-        min_diff = float('inf')
+        # 找到与原始动作最接近的幽灵球目标（同时考虑角度和力度）
+        min_cost = float('inf')
         best_phi = original_phi
+        best_v0 = original_v0
         found_valid = False
         
-        # 按角度差排序，优先检查最近的幽灵球
-        sorted_ghost_angles = []
-        for ghost_phi, tid in valid_ghost_angles:
-            diff = abs(ghost_phi - original_phi)
-            if diff > 180:
-                diff = 360 - diff
-            sorted_ghost_angles.append((diff, ghost_phi, tid))
+        # 计算每个幽灵球目标与原始动作的综合成本
+        sorted_ghost_targets = []
+        for ghost_phi, ghost_v0, dist, tid in valid_ghost_targets:
+            # 角度差（0-180度）
+            phi_diff = abs(ghost_phi - original_phi)
+            if phi_diff > 180:
+                phi_diff = 360 - phi_diff
+            
+            # 力度差（归一化到0-1）
+            v0_diff = abs(ghost_v0 - original_v0) / (8.0 - 0.5)  # 力度范围0.5-8.0
+            
+            # 综合成本（角度差权重更高，力度差权重次之）
+            # 角度差转换为0-1范围（180度=1）
+            cost = (phi_diff / 180.0) * 0.7 + v0_diff * 0.3
+            
+            sorted_ghost_targets.append((cost, ghost_phi, ghost_v0, dist, tid))
         
-        # 按角度差从小到大排序
-        sorted_ghost_angles.sort(key=lambda x: x[0])
+        # 按综合成本从小到大排序
+        sorted_ghost_targets.sort(key=lambda x: x[0])
         
-        # 选择第一个有效的幽灵球角度（最近且不犯规）
-        for diff, ghost_phi, tid in sorted_ghost_angles:
-            # 检查该角度是否会导致击打对方球（理论上不应该，因为已使用my_targets，但保险起见再检查）
+        # 选择第一个有效的幽灵球目标（综合成本最低且不犯规）
+        for cost, ghost_phi, ghost_v0, dist, tid in sorted_ghost_targets:
+            # 检查该目标是否合法
             if tid in my_targets or (len(my_targets) == 0 and tid == '8'):
                 best_phi = ghost_phi
+                best_v0 = ghost_v0
                 found_valid = True
                 break
         
-        # 如果没有找到有效角度（理论上不会发生），使用模型原始输出
+        # 如果没有找到有效目标（理论上不会发生），使用模型原始输出
         if not found_valid:
             return action
         
-        # 校准动作的角度为最接近的合法幽灵球角度
+        # 校准动作的角度和力度为最接近的合法幽灵球目标
         calibrated_action = action.copy()
-        calibrated_action[1] = best_phi
+        calibrated_action[1] = best_phi  # 校准角度
+        calibrated_action[0] = best_v0    # 校准力度
         
         return calibrated_action
 
