@@ -203,14 +203,33 @@ class MCTS:
 
     def _expand_and_evaluate(self, node, balls, table, player_targets, root_player):
         
-        # 1. 检查游戏是否结束（简化版，只检查黑八是否进袋）
+        # 1. 检查游戏是否结束（考虑黑八进袋的合法性）
         done = False
         winner = None
+        eight_in_pocket = False
+        
         for ball_id, ball in balls.items():
             if ball_id == '8' and ball.state.s == 4:
+                eight_in_pocket = True
+                break
+        
+        if eight_in_pocket:
+            # 检查黑八进袋是否合法
+            my_targets = player_targets[root_player]
+            remaining_my_balls = [bid for bid in my_targets if bid in balls and balls[bid].state.s != 4]
+            
+            # 黑八合法进袋条件：当前玩家已清台（只剩黑八）且黑八是唯一目标球
+            is_eight_legal = (len(remaining_my_balls) == 0) and (len(my_targets) == 1 and my_targets[0] == '8')
+            
+            if is_eight_legal:
+                # 合法黑八进袋，当前玩家获胜
                 done = True
                 winner = root_player
-                break
+            else:
+                # 非法黑八进袋，当前玩家失败
+                done = True
+                opponent_player = 'B' if root_player == 'A' else 'A'
+                winner = opponent_player
         
         if done:
             return 1.0 if winner == root_player else 0.0
@@ -689,7 +708,7 @@ class MCTS:
 
     def _check_foul(self, shot, last_state, player_targets, current_player):
         """
-        检查击球是否犯规
+        检查击球是否犯规（完全对齐台球规则）
         
         参数：
             shot: 已完成物理模拟的System对象
@@ -699,14 +718,23 @@ class MCTS:
             
         返回：
             bool: True表示犯规，False表示合法
+            
+        规则核心：
+            - 清台前：player_targets = ['1'-'7'] 或 ['9'-'15']，黑8不属于任何人
+            - 清台后：player_targets = ['8']，黑8成为唯一目标球
         """
         # 1. 基本分析
         new_pocketed = [bid for bid, b in shot.balls.items() if b.state.s == 4 and last_state[bid].state.s != 4]
         cue_pocketed = "cue" in new_pocketed
         eight_pocketed = "8" in new_pocketed
         
-        # 2. 首球碰撞分析
+        # 2. 玩家目标球分析
+        my_targets = player_targets[current_player]
+        my_remaining = [bid for bid in my_targets if last_state[bid].state.s != 4]
+        
+        # 3. 首球碰撞分析
         first_contact_ball_id = None
+        foul_first_hit = False
         valid_ball_ids = {'1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15'}
         
         for e in shot.events:
@@ -718,9 +746,32 @@ class MCTS:
                     first_contact_ball_id = other_ids[0]
                     break
         
-        # 3. 碰库分析
+        # 首球碰撞规则：
+        # a. 未击中任何球（特殊情况：只剩白球和黑8且已清台，不算犯规）
+        if first_contact_ball_id is None:
+            # 检查是否只剩白球和黑8且已清台
+            remaining_balls = [bid for bid, b in last_state.items() if b.state.s != 4 and bid != 'cue']
+            is_only_eight_left = len(remaining_balls) == 1 and remaining_balls[0] == '8' and len(my_targets) == 1 and my_targets[0] == '8'
+            if not is_only_eight_left:
+                foul_first_hit = True
+        else:
+            # b. 首次击打的球必须是目标球
+            if first_contact_ball_id not in my_targets:
+                # 特殊情况：清台后（my_targets=['8']），只能打黑8
+                if len(my_targets) == 1 and my_targets[0] == '8':
+                    if first_contact_ball_id != '8':
+                        foul_first_hit = True
+                # 特殊情况：清台前，不能打黑8
+                elif first_contact_ball_id == '8':
+                    foul_first_hit = True
+                # 其他情况：不能打对手球
+                else:
+                    foul_first_hit = True
+        
+        # 4. 碰库分析
         cue_hit_cushion = False
         target_hit_cushion = False
+        foul_no_rail = False
         
         for e in shot.events:
             et = str(e.event_type).lower()
@@ -731,44 +782,25 @@ class MCTS:
                 if first_contact_ball_id is not None and first_contact_ball_id in ids:
                     target_hit_cushion = True
         
-        # 4. 玩家目标球分析
-        my_targets = player_targets[current_player]
-        my_remaining = [bid for bid in my_targets if last_state[bid].state.s != 4]
-        
-        # 对手球分析
-        opponent_player = 'B' if current_player == 'A' else 'A'
-        opponent_targets = player_targets[opponent_player]
-        
-        # 定义对手球和黑8的集合（当有目标球剩余时）
-        opponent_plus_eight = set(opponent_targets) | {'8'}
-        
-        # 5. 犯规判断
-        # 白球进袋
-        if cue_pocketed:
-            return True
-        
-        # 白球和黑八同时进袋
-        if cue_pocketed and eight_pocketed:
-            return True
-        
-        # 未击中任何球
-        if first_contact_ball_id is None:
-            return True
-        
-        # 无进球且无球碰库
+        # 碰库规则：无进球且首球和白球都未碰库，犯规
         if len(new_pocketed) == 0 and first_contact_ball_id is not None and (not cue_hit_cushion) and (not target_hit_cushion):
-            return True
+            foul_no_rail = True
         
-        # 新增：当有目标球剩余时，首次碰撞黑八（误打黑八）
-        if len(my_remaining) > 0 and first_contact_ball_id == '8':
-            return True
+        # 5. 进球规则分析
+        foul_pocket = False
         
-        # 新增：当有目标球剩余时，首次碰撞对手球
-        if len(my_remaining) > 0 and first_contact_ball_id in opponent_targets:
-            return True
+        # a. 白球进袋
+        if cue_pocketed:
+            foul_pocket = True
         
-        # 新增：当只剩黑八时，首次碰撞非黑八球
-        if len(my_remaining) == 0 and first_contact_ball_id != '8':
+        # b. 非法黑8（清台前打黑8）
+        if eight_pocketed:
+            is_targeting_eight_ball_legally = (len(my_targets) == 1 and my_targets[0] == "8")
+            if not is_targeting_eight_ball_legally:
+                foul_pocket = True
+        
+        # 6. 综合犯规判断
+        if foul_pocket or foul_first_hit or foul_no_rail:
             return True
         
         return False
