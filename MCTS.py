@@ -344,10 +344,10 @@ class MCTS:
         states = self.state_preprocessor(states)
         return torch.from_numpy(states).float()
 
-    def _expand_and_evaluate(self, node, balls, table, player_targets, root_player, depth):
+    def _expand_and_evaluate(self, node, balls, table, player_targets, root_player, depth, remaining_hits):
         """扩展节点并评估"""
-        # 1. 检查深度限制
-        if depth >= self.max_depth:
+        # 1. 检查深度限制，不超过剩余杆数
+        if depth >= remaining_hits:
             # 只使用value network评估
             state_tensor = self._state_seq_to_tensor(node.state_seq)
             state_tensor = state_tensor.unsqueeze(0).to(self.device)
@@ -419,13 +419,13 @@ class MCTS:
             normalized_reward = (raw_reward - (-500)) / 650.0
             normalized_reward = np.clip(normalized_reward, 0.0, 1.0)
             
-            # 根据深度调整value network和物理模拟的权重
-            depth_factor = depth / self.max_depth  # 0-1，深度越深，value network权重越大
+            # 根据深度调整value network和物理模拟的权重，使用剩余杆数作为最大深度
+            depth_factor = depth / remaining_hits if remaining_hits > 0 else 1.0  # 0-1，深度越深，value network权重越大
             value = depth_factor * value_output + (1 - depth_factor) * normalized_reward
             
             # 递归扩展子节点：只有当不是直接输掉的情况才扩展
             # raw_reward=-500表示直接输掉，normalized_reward<0.1表示接近输掉
-            if shot is not None and raw_reward > -500 and normalized_reward > 0:
+            if shot is not None and raw_reward > -500 and normalized_reward > 0 and (depth + 1) < remaining_hits:
                 # 生成新的状态向量
                 new_balls_state = {bid: ball for bid, ball in shot.balls.items()}
                 # 使用_balls_state_to_81方法将balls_state转换为81维向量
@@ -436,7 +436,7 @@ class MCTS:
                 )
                 new_state_seq = node.state_seq[1:] + [new_state_vec]
                 child_node = MCTSNode(new_state_seq, parent=node)
-                child_value = self._expand_and_evaluate(child_node, shot.balls, table, player_targets, root_player, depth + 1)
+                child_value = self._expand_and_evaluate(child_node, shot.balls, table, player_targets, root_player, depth + 1, remaining_hits)
                 value += child_value * 0.9  # 衰减因子
             
             if value > best_value:
@@ -444,7 +444,7 @@ class MCTS:
         
         return best_value
 
-    def search(self, state_seq, balls, table, player_targets, root_player):
+    def search(self, state_seq, balls, table, player_targets, root_player, remaining_hits):
         """执行MCTS搜索
         
         参数：
@@ -453,6 +453,7 @@ class MCTS:
             table: 球桌对象
             player_targets: 玩家目标球字典，{player: [target_ball_ids]}
             root_player: 当前玩家，'A'或'B'
+            remaining_hits: 剩余杆数
             
         返回：
             numpy数组: 最佳动作，包含V0、phi、theta、a、b五个属性
@@ -465,6 +466,9 @@ class MCTS:
         
         N = np.zeros(n_candidates)
         Q = np.zeros(n_candidates)
+        
+        # 计算当前回合的实际最大深度，不超过剩余杆数
+        current_max_depth = min(self.max_depth, remaining_hits)
         
         # MCTS循环
         for _ in range(self.n_simulations):
@@ -501,7 +505,7 @@ class MCTS:
             
             # 初始深度为0，所以物理模拟权重更大
             depth = 0
-            depth_factor = depth / self.max_depth
+            depth_factor = depth / current_max_depth
             value = depth_factor * value_output + (1 - depth_factor) * normalized_reward
             
             # 5. Backpropagation

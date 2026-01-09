@@ -95,8 +95,11 @@ class MCTSAgent(Agent):
             self.state_buffer.append(state_vec)
         state_seq = list(self.state_buffer)
         
+        # 计算剩余杆数（比赛最多60杆）
+        remaining_hits = 60 - self.hit_count
+        
         # 调用 MCTS 搜索获取动作
-        action = self.mcts.search(state_seq, balls_state, table, self.env.player_targets, self.env.get_curr_player())
+        action = self.mcts.search(state_seq, balls_state, table, self.env.player_targets, self.env.get_curr_player(), remaining_hits)
         
         # 递增击球计数器
         self.hit_count += 1
