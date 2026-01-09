@@ -280,16 +280,57 @@ class MCTS:
             print("base_action:", base_action)  # 调试信息
             print("calibrated_action:", calibrated_action)  # 调试信息
         
-        # 6. 连续动作采样 - 使用校准后的动作进行采样
-        sampled_action_norms = self.sampler.sample(
-            calibrated_action_norm,
-            self.n_action_samples
-        )
-
-        sampled_actions = [
-            self._denormalize_action(a_norm)
-            for a_norm in sampled_action_norms
-        ]
+        # 6. 实现新的采样策略：角度微调 + 力度档位采样
+        # 基于校准后的动作生成样本，不再使用高斯噪声
+        sampled_actions = []
+        
+        # 获取校准后的原始动作（真实物理动作，未归一化）
+        base_action = self._denormalize_action(calibrated_action_norm)
+        
+        # 采样参数配置
+        angle_offsets = [-0.5, 0, 0.5]  # 角度微调范围（度）
+        
+        # 力度档位配置（参考basic_agent_pro.py）
+        # 根据距离估算的基础力度，生成不同档位的力度
+        v_base = base_action[0]  # 基础力度
+        
+        # 根据n_samples动态调整力度档位数量
+        if self.n_action_samples <= 3:
+            # 少量样本：只采样基础力度
+            v_offsets = [0.0]
+        elif self.n_action_samples <= 6:
+            # 中等样本：基础力度、稍小、稍大
+            v_offsets = [-1.0, 0.0, 1.0]
+        else:
+            # 大量样本：多档位力度
+            v_offsets = [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0]
+        
+        # 生成角度和力度的组合样本
+        for angle_offset in angle_offsets:
+            for v_offset in v_offsets:
+                # 计算新的角度（0-360度）
+                new_phi = (base_action[1] + angle_offset) % 360
+                
+                # 计算新的力度（限制在0.5-8.0范围内）
+                new_v0 = np.clip(v_base + v_offset, 0.5, 8.0)
+                
+                # 创建新动作，保持其他参数不变
+                new_action = base_action.copy()
+                new_action[0] = new_v0  # 力度
+                new_action[1] = new_phi  # 角度
+                
+                sampled_actions.append(new_action)
+                
+                # 如果已经生成足够的样本，停止采样
+                if len(sampled_actions) >= self.n_action_samples:
+                    break
+            
+            if len(sampled_actions) >= self.n_action_samples:
+                break
+        
+        # 如果样本数量不足（例如n_samples=1），确保至少有一个样本
+        if not sampled_actions:
+            sampled_actions.append(base_action.copy())
         
         # 5. 基于相似度构造先验
         distances = np.array(
