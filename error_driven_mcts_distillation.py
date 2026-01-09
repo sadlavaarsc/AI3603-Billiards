@@ -30,10 +30,8 @@ def create_pooltool_objects(balls_dict, table_type="7_foot"):
     # 创建球对象
     balls = {}
     for ball_id, ball_data in balls_dict.items():
-        if ball_id == 'cue':
-            ball = pt.CueBall.make()
-        else:
-            ball = pt.ObjectBall.make(ball_id)
+        # 使用正确的Ball.create()方法创建球对象
+        ball = pt.Ball.create(ball_id)
         
         # 设置球的位置和状态
         ball.state.rvw[0] = [ball_data['x'], ball_data['y'], ball_data['z']]
