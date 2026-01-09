@@ -55,19 +55,19 @@ def print_current_stats(current_game, total_games, results):
 
 def main():
     # 1. 保存原始的控制台输出（后续可恢复）
-    original_stdout = sys.stdout
+    #original_stdout = sys.stdout
 
     # 2. 直接创建UTF-8编码的文件对象（核心：指定encoding='utf-8'）
-    # mode='w' 覆盖文件，mode='a' 追加内容（根据需求选）
-    # f = open('120_results.txt', 'w', encoding='utf-8', buffering=1)
+    #mode='w' 覆盖文件，mode='a' 追加内容（根据需求选）
+    #f = open('120_results.txt', 'w', encoding='utf-8', buffering=1)
 
     # 3. 将print重定向到这个文件对象
-    # sys.stdout = f
+    #sys.stdout = f
 
     # 初始化环境和参数
     env = PoolEnv()
     results = {'AGENT_A_WIN': 0, 'AGENT_B_WIN': 0, 'SAME': 0}
-    n_games = 10  # 对战局数，可根据需要调整
+    n_games = 120  # 对战局数，可根据需要调整
 
     # 加载模型
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -175,8 +175,8 @@ def main():
         print("双方最终战平！")
 
     # 恢复标准输出（如果之前重定向了）
-    # sys.stdout = original_stdout
-    # f.close()
+    #sys.stdout = original_stdout
+    #f.close()
 
 
 if __name__ == '__main__':
