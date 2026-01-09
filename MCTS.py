@@ -529,7 +529,8 @@ class MCTS:
             
             # 初始深度为0，所以物理模拟权重更大
             depth = 0
-            depth_factor = depth / current_max_depth
+            # 避免除0错误
+            depth_factor = depth / current_max_depth if current_max_depth > 0 else 1.0
             value = depth_factor * value_output + (1 - depth_factor) * normalized_reward
             
             # 5. Backpropagation
