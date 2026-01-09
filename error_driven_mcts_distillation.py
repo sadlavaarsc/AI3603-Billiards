@@ -41,23 +41,10 @@ def filter_no_pocketing_states(match_dir, max_states=5000):
                         break
                         
                     try:
-                        pre_state = shot['pre_state']
-                        post_state = shot['post_state']
-                        
-                        # 检查是否有进球
-                        pre_balls = pre_state['balls']
-                        post_balls = post_state['balls']
-                        
-                        # 检查是否有球从非进袋状态变为进袋状态
-                        has_pocketing = False
-                        for ball_id, post_ball in post_balls.items():
-                            if ball_id in pre_balls:
-                                pre_ball = pre_balls[ball_id]
-                                if pre_ball['s'] != 4 and post_ball['s'] == 4:
-                                    has_pocketing = True
-                                    break
-                        
-                        if not has_pocketing:
+                        # 检查是否有我方进球
+                        if 'result' in shot and shot['result']['ME_INTO_POCKET'] == []:
+                            pre_state = shot['pre_state']
+                            
                             # 创建临时球桌对象用于后续评估
                             table = pt.PocketTable(model="7_foot")
                             
@@ -246,12 +233,13 @@ def save_correction_states(states, output_file):
         states: 包含MCTS结果的状态列表
         output_file: 输出文件路径
     """
-    # 准备数据
+    # 准备数据，与process_raw_match_data.py兼容的格式
     correction_data = {
         'metadata': {
-            'type': 'error_driven_mcts_distillation',
-            'timestamp': datetime.now().isoformat(),
-            'count': len(states)
+            'winner': 'A',  # 默认赢家，实际使用时会被替换
+            'start_time': datetime.now().isoformat(),
+            'end_time': datetime.now().isoformat(),
+            'total_shots': len(states)
         },
         'shots': []
     }
@@ -265,11 +253,15 @@ def save_correction_states(states, output_file):
                 'x': ball.state.rvw[0][0],
                 'y': ball.state.rvw[0][1],
                 'z': ball.state.rvw[0][2],
+                'vx': 0.0,  # 初始速度为0
+                'vy': 0.0,
+                'vz': 0.0,
                 's': ball.state.s
             }
         
-        # 添加shot
+        # 添加shot，与原始数据格式匹配
         correction_data['shots'].append({
+            'hit_count': i + 1,
             'player': 'A',
             'pre_state': {
                 'balls': balls_dict,
@@ -282,7 +274,16 @@ def save_correction_states(states, output_file):
                 'a': state_data['best_action'][3],
                 'b': state_data['best_action'][4]
             },
-            'value': state_data['best_value']
+            'result': {
+                'ME_INTO_POCKET': [],  # 假设没有进球
+                'ENEMY_INTO_POCKET': [],
+                'WHITE_BALL_INTO_POCKET': False,
+                'BLACK_BALL_INTO_POCKET': False,
+                'FOUL_FIRST_HIT': False,
+                'NO_POCKET_NO_RAIL': False,
+                'NO_HIT': False
+            },
+            'decision_time': 0.0  # 决策时间
         })
     
     # 保存文件
