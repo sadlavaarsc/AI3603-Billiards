@@ -59,7 +59,7 @@ class MCTS:
         debug=False,
         n_rollouts_per_action=1,  # 每个action的模拟次数
         max_depth=3,  # 最大搜索深度，超过该深度不再衍生子节点
-        initial_keep_count=8,  # 初始动作保留数量
+        initial_keep_count=50,  # 初始动作保留数量
         keep_reduction_factor=2  # 每深入一层，保留数量减半的因子
     ):
         self.model = model
@@ -79,8 +79,6 @@ class MCTS:
         self.sim_noise = {
             'V0': 0.1, 'phi': 0.15, 'theta': 0.1, 'a': 0.005, 'b': 0.005
         }
-
-        self.sampler = ActionSampler()
 
         # ===== 与训练代码完全一致的动作范围 =====
         self.action_min = np.array([0.5, 0.0, 0.0, -0.5, -0.5], dtype=np.float32)
@@ -355,7 +353,7 @@ class MCTS:
         
         # 调试信息：只在根节点且是第一次模拟时打印
         # 通过检查节点深度和子节点数量来判断是否是第一次模拟
-        if node.parent is None and self.debug and len(node.children) == 0:
+        if node.parent is None and self.debug and len(node.children) == 0 and False:
             print("policy_norm:", action_norm)  # 调试信息
             print("model_action:", model_action)  # 调试信息
             print("value:", value)         # 调试信息
