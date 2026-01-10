@@ -553,6 +553,11 @@ class MCTS:
                 new_state_seq = node.state_seq[1:] + [new_state_vec]
                 child_node = MCTSNode(new_state_seq, parent=node)
                 child_value = self._expand_and_evaluate(child_node, shot.balls, table, player_targets, next_player, depth + 1, remaining_hits)
+                
+                # 如果切换了玩家，对手的value对当前玩家来说是负的，需要反转
+                if switch_player:
+                    child_value = -child_value
+                    
                 value += child_value * 0.9  # 衰减因子
             
             if value > best_value:
