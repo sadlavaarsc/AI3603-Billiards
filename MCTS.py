@@ -52,8 +52,8 @@ class MCTS:
                  model,
                  n_simulations=150,
                  c_puct=1.414,
-                 max_depth=3,
-                 max_search_time=7.0,
+                 max_depth=4,
+                 max_search_time=15.0,
                  device="cuda" if torch.cuda.is_available() else "cpu"):
         self.model = model
         self.n_simulations = n_simulations
@@ -445,7 +445,7 @@ class MCTS:
         action_distances.sort(key=lambda x: x[1])
         
         # 保留指定数量的动作，默认为n_simulations/2，至少保留1个
-        keep_count = max(1, int(self.n_simulations / 2))
+        keep_count = max(1, int(self.n_simulations*2 / 3))
         filtered_actions = [action for action, distance in action_distances[:keep_count]]
         
         # 如果只剩下黑八一个待打的球，确保生成打黑八的动作并加入
