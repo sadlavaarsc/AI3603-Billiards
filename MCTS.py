@@ -491,15 +491,68 @@ class MCTS:
             if shot is not None and raw_reward > -500 and normalized_reward > 0 and (depth + 1) < remaining_hits:
                 # 生成新的状态向量
                 new_balls_state = {bid: ball for bid, ball in shot.balls.items()}
-                # 使用_balls_state_to_81方法将balls_state转换为81维向量
+                
+                # 根据台球规则判断是否需要切换玩家
+                # 1. 计算首球碰撞和犯规情况
+                first_contact_ball_id = None
+                foul_first_hit = False
+                valid_ball_ids = {'1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15'}
+                
+                for e in shot.events:
+                    et = str(e.event_type).lower()
+                    ids = list(e.ids) if hasattr(e, 'ids') else []
+                    if ('cushion' not in et) and ('pocket' not in et) and ('cue' in ids):
+                        other_ids = [i for i in ids if i != 'cue' and i in valid_ball_ids]
+                        if other_ids:
+                            first_contact_ball_id = other_ids[0]
+                            break
+                
+                # 首球犯规判定
+                if first_contact_ball_id is None:
+                    foul_first_hit = True
+                else:
+                    foul_first_hit = first_contact_ball_id not in player_targets[root_player]
+                
+                # 2. 计算碰库犯规
+                cue_hit_cushion = False
+                target_hit_cushion = False
+                
+                for e in shot.events:
+                    et = str(e.event_type).lower()
+                    ids = list(e.ids) if hasattr(e, 'ids') else []
+                    if 'cushion' in et:
+                        if 'cue' in ids:
+                            cue_hit_cushion = True
+                        if first_contact_ball_id is not None and first_contact_ball_id in ids:
+                            target_hit_cushion = True
+                
+                new_pocketed = [bid for bid, b in shot.balls.items() if b.state.s == 4 and last_state_snapshot[bid].state.s != 4]
+                own_pocketed = [bid for bid in new_pocketed if bid in player_targets[root_player]]
+                cue_pocketed = "cue" in new_pocketed
+                
+                # 碰库犯规：没有进球且没有碰到库边
+                foul_no_rail = len(new_pocketed) == 0 and first_contact_ball_id is not None and (not cue_hit_cushion) and (not target_hit_cushion)
+                
+                # 3. 判断是否需要切换玩家
+                # 切换玩家的条件：
+                # a. 白球进袋
+                # b. 首球犯规
+                # c. 碰库犯规
+                # d. 没有己方球进袋
+                switch_player = cue_pocketed or foul_first_hit or foul_no_rail or len(own_pocketed) == 0
+                
+                # 4. 确定下一个玩家
+                next_player = 'B' if root_player == 'A' else 'A' if switch_player else root_player
+                
+                # 5. 生成新的状态向量
                 new_state_vec = self._balls_state_to_81(
                     new_balls_state,
-                    my_targets=player_targets[root_player],
+                    my_targets=player_targets[next_player],
                     table=table
                 )
                 new_state_seq = node.state_seq[1:] + [new_state_vec]
                 child_node = MCTSNode(new_state_seq, parent=node)
-                child_value = self._expand_and_evaluate(child_node, shot.balls, table, player_targets, root_player, depth + 1, remaining_hits)
+                child_value = self._expand_and_evaluate(child_node, shot.balls, table, player_targets, next_player, depth + 1, remaining_hits)
                 value += child_value * 0.9  # 衰减因子
             
             if value > best_value:
