@@ -54,12 +54,14 @@ class MCTS:
                  c_puct=1.414,
                  max_depth=4,
                  max_search_time=15.0,
+                 action_keep_ratio=2/3,
                  device="cuda" if torch.cuda.is_available() else "cpu"):
         self.model = model
         self.n_simulations = n_simulations
         self.c_puct = c_puct
         self.max_depth = max_depth
         self.max_search_time = max_search_time  # 搜索限时，单位：秒
+        self.action_keep_ratio = action_keep_ratio  # 动作保留比例，用于控制保留的动作数量
         self.device = device
         self.ball_radius = 0.028575
         
@@ -444,9 +446,14 @@ class MCTS:
         # 按照距离从小到大排序
         action_distances.sort(key=lambda x: x[1])
         
-        # 保留指定数量的动作，默认为n_simulations/2，至少保留1个
-        keep_count = max(1, int(self.n_simulations*2 / 3))
-        filtered_actions = [action for action, distance in action_distances[:keep_count]]
+        # 残局处理：只剩黑八时，保留所有动作
+        if has_only_eight_ball:
+            # 保留全部动作，不进行筛选
+            filtered_actions = [action for action, distance in action_distances]
+        else:
+            # 保留指定数量的动作，使用可调比例，至少保留1个
+            keep_count = max(1, int(self.n_simulations * self.action_keep_ratio))
+            filtered_actions = [action for action, distance in action_distances[:keep_count]]
         
         # 如果只剩下黑八一个待打的球，确保生成打黑八的动作并加入
         if has_only_eight_ball:
@@ -518,6 +525,9 @@ class MCTS:
         
         root = MCTSNode(state_seq)
         
+        # 检查是否为残局（只剩黑八一个球要打）
+        is_endgame = len(player_targets[root_player]) == 1 and player_targets[root_player][0] == '8'
+        
         # 生成候选动作
         candidate_actions = self.generate_heuristic_actions(balls, player_targets[root_player], table)
         n_candidates = len(candidate_actions)
@@ -525,8 +535,11 @@ class MCTS:
         N = np.zeros(n_candidates)
         Q = np.zeros(n_candidates)
         
-        # 计算当前回合的实际最大深度，不超过剩余杆数
-        current_max_depth = min(self.max_depth, remaining_hits)
+        # 残局时调整参数：
+        # 1. 实际使用的n_simulations*3/2
+        # 2. 实际使用的max_depth*3/2
+        current_n_simulations = int(self.n_simulations * 3 / 2) if is_endgame else self.n_simulations
+        current_max_depth = min(int(self.max_depth * 3 / 2), remaining_hits) if is_endgame else min(self.max_depth, remaining_hits)
         
         # 记录搜索开始时间
         start_time = time.time()
@@ -535,7 +548,7 @@ class MCTS:
         simulation_count = 0
         time_exceeded = False
         
-        for _ in range(self.n_simulations):
+        for _ in range(current_n_simulations):
             # 检查是否超过搜索时间限制
             elapsed_time = time.time() - start_time
             if elapsed_time > self.max_search_time:
