@@ -9,7 +9,8 @@ from .basic_agent_pro import analyze_shot_for_reward
 
 
 BALL_R = 0.028575
-
+###对战Basic 109/3/120 
+###对战Pro   62/120
 
 # ================= 几何工具 =================
 
@@ -106,7 +107,7 @@ class NewAgentPro(Agent):
         random.shuffle(actions)
         return actions[:20]
 
-    # ---------- Safety Shot ----------
+    # ---------- 防守动作生成 ----------
 
     def generate_safety_actions(self, balls, my_targets):
         cue = balls['cue'].state.rvw[0]
@@ -155,14 +156,83 @@ class NewAgentPro(Agent):
 
     # ---------- 对手回应评估 ----------
 
+    def generate_opponent_actions(self, balls, opp_targets, table):
+        """
+        对手动作生成
+        """
+        actions = []
+        cue_pos = balls['cue'].state.rvw[0]
+        
+
+        pocket_list = list(table.pockets.values())
+        random.shuffle(pocket_list) 
+        
+        # 1. 进攻
+        for tid in opp_targets:
+            if balls[tid].state.s == 4:
+                continue
+            obj_pos = balls[tid].state.rvw[0]
+            
+            for pocket in pocket_list[:3]:  
+                res = self.ghost_shot(cue_pos, obj_pos, pocket.center)
+                if res is None:
+                    continue
+                phi, dist, ghost = res
+
+                if not is_path_clear(cue_pos, ghost, balls, ['cue', tid]):
+                    continue
+                if not is_path_clear(obj_pos, pocket.center, balls, [tid]):
+                    continue
+                
+                v0 = np.clip(1.2 + dist * 1.4, 1.0, 6.8)
+                
+                actions.append({
+                    'V0': v0,
+                    'phi': phi,
+                    'theta': 0,
+                    'a': 0,
+                    'b': 0
+                })
+                break  
+        
+        # 2. 如果无进攻动作，添加一些直接瞄准的动作
+        if not actions:
+            for tid in opp_targets[:2]:  # 只考虑前2个目标球
+                if balls[tid].state.s == 4:
+                    continue
+                obj_pos = balls[tid].state.rvw[0]
+                v = obj_pos - cue_pos
+                phi = angle(v)
+                v0 = np.clip(1.5 + np.linalg.norm(v) * 0.5, 1.0, 3.0)
+                actions.append({
+                    'V0': v0,
+                    'phi': phi,
+                    'theta': 0,
+                    'a': 0,
+                    'b': 0
+                })
+        
+        # 3. 随机动作
+        for _ in range(max(0, 5 - len(actions))): 
+            actions.append(self._random_action())
+        
+        return actions[:5] 
+
     def opponent_best_reply(self, shot, table, my_targets):
         opp_targets = [
             bid for bid in shot.balls
             if bid not in my_targets and bid not in ['cue']
         ]
+        if not opp_targets:
+            return 0
+        
+        valid_opp_targets = [t for t in opp_targets if shot.balls[t].state.s != 4]
+        if not valid_opp_targets:
+            return 0
+        
         best = 0
-        for _ in range(self.opp_rollout):
-            action = self._random_action()
+        opp_actions = self.generate_opponent_actions(shot.balls, opp_targets, table)
+        for action in opp_actions[:self.opp_rollout]:
             sim = self.simulate(shot.balls, table, action)
             if sim:
                 r = analyze_shot_for_reward(sim,
@@ -177,7 +247,7 @@ class NewAgentPro(Agent):
         if balls is None:
             return self._random_action()
 
-        # 清台处理
+        # 黑8
         if all(balls[t].state.s == 4 for t in my_targets):
             my_targets = ['8']
 
@@ -208,7 +278,7 @@ class NewAgentPro(Agent):
                 best_score = avg
                 best_action = action
 
-        # ---------- Safety fallback ----------
+        # ---------- 防守策略 ----------
         if best_score < 15:
             for action in safety_actions:
                 shot = self.simulate(balls, table, action)
@@ -221,5 +291,15 @@ class NewAgentPro(Agent):
         if best_action is None:
             return self._random_action()
 
-        print(f"[SuperAgent] Best score: {best_score:.2f}")
+        print(f"[PhysicalAgent] Best score: {best_score:.2f}")
         return best_action
+    
+    def _random_action(self):
+        """生成随机动作"""
+        return {
+            'V0': np.random.uniform(0.8, 3.0),
+            'phi': np.random.uniform(0, 360),
+            'theta': 0,
+            'a': 0,
+            'b': 0
+        }
