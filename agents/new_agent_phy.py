@@ -9,8 +9,6 @@ from .basic_agent_pro import analyze_shot_for_reward
 
 
 BALL_R = 0.028575
-###对战Basic 109/3/120 
-###对战Pro   62/120
 
 # ================= 几何工具 =================
 
