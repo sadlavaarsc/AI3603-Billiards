@@ -422,6 +422,50 @@ class MCTS:
         
         # 4. 反归一化得到模型输出的原始动作
         model_action = self._denormalize_action(policy_output)
+        # 原始模型动作加入候选池 =========
+        model_action_dict = {
+            'V0': float(model_action[0]),
+            'phi': float(model_action[1]),
+            'theta': float(model_action[2]),
+            'a': float(model_action[3]),
+            'b': float(model_action[4]),
+        }
+
+        # 像幽灵球动作一样参与候选
+        candidate_actions.append(model_action_dict)
+
+        # 非残局禁止提前打黑八
+        if not has_only_eight_ball:
+            # 过滤掉以黑八为目标的动作（通过幽灵球角度近似判断）
+            legal_actions = []
+            eight_ball = balls.get('8')
+            if eight_ball and eight_ball.state.s != 4:
+                eight_pos = eight_ball.state.rvw[0]
+                cue_pos = balls['cue'].state.rvw[0]
+
+                # 计算所有黑八幽灵球方向（作为禁区）
+                forbidden_phis = []
+                for pocket in table.pockets.values():
+                    phi_8, _ = self._get_ghost_ball_target(cue_pos, eight_pos, pocket.center)
+                    forbidden_phis.append(phi_8)
+
+                for action in candidate_actions:
+                    phi = action['phi']
+                    # 若与任一黑八幽灵球方向接近，则认为是“打黑八”
+                    is_eight_shot = any(
+                        abs((phi - f + 180) % 360 - 180) < 2.0
+                        for f in forbidden_phis
+                    )
+                    if not is_eight_shot:
+                        legal_actions.append(action)
+            else:
+                legal_actions = candidate_actions
+
+            # 若过滤后为空，退化为随机动作（只模拟一次，不浪费性能）
+            if len(legal_actions) == 0:
+                legal_actions = [self._random_action()]
+
+            candidate_actions = legal_actions
         
         # 5. 动作筛选：根据与模型输出的接近程度排序，保留指定数量的动作
         action_distances = []
