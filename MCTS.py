@@ -8,6 +8,8 @@ from data_loader import StatePreprocessor
 # ============ MCTS Node ============
 class MCTSNode:
     def __init__(self, state_seq, parent=None, prior=1.0, action=None):
+        # ⚠️ 注意：state_seq仅用于初始化，实际状态推进靠外部current_state_seq变量
+        # Node不是状态节点，只是统计容器，state_seq不会自动更新
         self.state_seq = state_seq
         self.parent = parent
         self.action = action
@@ -48,10 +50,12 @@ class MCTSNode:
     def backup(self, value):
         """备份价值，更新节点的访问次数和价值"""
         node = self
+        v = value
         while node is not None:
             node.N += 1
-            node.W += value
+            node.W += v
             node.Q = node.W / node.N
+            v = -v  # ★ 关键：每向上走一层翻转符号，考虑玩家视角切换
             node = node.parent
 
 # ============ Multi-step MCTS ============
@@ -268,13 +272,12 @@ class MCTS:
         # 计算奖励分数
         score = 0
         
-        if cue_pocketed and eight_pocketed:
-            score -= 500
-        elif cue_pocketed:
+        if cue_pocketed:
             score -= 100
         elif eight_pocketed:
-            is_targeting_eight_ball_legally = (len(player_targets) == 1 and player_targets[0] == "8")
-            score += 150 if is_targeting_eight_ball_legally else -500
+            # 黑八入袋，由_evaluate_leaf统一判断胜负
+            # 这里只给基础分数，具体胜负由叶节点评估决定
+            score += 100
                 
         # 特殊规则：当只剩黑八一个球但是还选择打别人的球时，给一个较小的惩罚
         only_eight_ball_left = (len(player_targets) == 1 and player_targets[0] == "8")
@@ -421,6 +424,8 @@ class MCTS:
         
         # 记录搜索开始时间
         start_time = time.time()
+        # P0-3优化：时间限制修复 - 定义绝对截止时间
+        deadline = start_time + self.max_search_time
         
         # 创建根节点
         root = MCTSNode(state_seq)
@@ -486,6 +491,9 @@ class MCTS:
         # 再取比例保留数量和最大保留数量的最小值
         keep_count = min(ratio_keep_count, self.action_max_keep_count)
         
+        # 修复：根节点最多允许 min(keep_count, 固定上限如 10) 个动作
+        keep_count = min(keep_count, 10)
+        
         filtered_actions = [action for action, dist in action_distances[:keep_count]]
         
         # 4️⃣ Value + 人工reward混合筛选
@@ -517,7 +525,7 @@ class MCTS:
         # 对缓存未命中的动作进行物理仿真
         for action in cache_misses:
             # P0-3优化：在deepcopy前检查超时
-            if time.time() - start_time > self.max_search_time:
+            if time.time() > deadline:
                 time_exceeded = True
                 break
             
@@ -527,7 +535,7 @@ class MCTS:
             last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in sim_balls.items()}
             
             # P0-3优化：在simulate_action前检查超时
-            if time.time() - start_time > self.max_search_time:
+            if time.time() > deadline:
                 time_exceeded = True
                 break
             
@@ -552,8 +560,8 @@ class MCTS:
             
             is_black_eight_foul = False
             if (cue_in_pocket and eight_in_pocket) or (eight_in_pocket and has_non_eight_targets_left):
-                # 黑八违规，直接给极值惩罚
-                reward = -500
+                # 黑八违规，设置标志但不直接修改reward
+                # reward将在后续被归一化处理
                 is_black_eight_foul = True
             
             # 计算next_state_seq
@@ -584,7 +592,7 @@ class MCTS:
         model_values = {}
         if state_seqs_to_evaluate:
             # P0-3优化：在模型推理前检查超时
-            if time.time() - start_time > self.max_search_time:
+            if time.time() > deadline:
                 time_exceeded = True
             else:
                 # 将所有状态序列转换为张量并批量化
@@ -671,14 +679,8 @@ class MCTS:
         time_exceeded = False
         
         # 3️⃣ 多次模拟：选择、扩展+评估、备份
-        for _ in range(current_n_simulations):
-            # 检查是否超过搜索时间限制
-            elapsed_time = time.time() - start_time
-            if elapsed_time > self.max_search_time:
-                time_exceeded = True
-                print(f"[Multi-step MCTS] 搜索时间超过限制 ({elapsed_time:.2f}s > {self.max_search_time}s)，提前终止搜索")
-                break
-            
+        # P0-3优化：时间限制修复 - 以时间为第一约束，simulation数为第二约束
+        while simulation_count < current_n_simulations and time.time() < deadline:
             simulation_count += 1
             
             # Selection
@@ -705,7 +707,7 @@ class MCTS:
                 path.append(node)
                 
                 # 执行动作前检查时间限制
-                if time.time() - start_time > self.max_search_time:
+                if time.time() > deadline:
                     time_exceeded = True
                     break
                 
@@ -792,7 +794,7 @@ class MCTS:
             
             # 3. Expansion: 如果节点未扩展，生成候选动作并扩展
             if not node.is_expanded and current_depth < remaining_hits:
-                # P0-Value剪枝：Expansion剪枝（最基础，必做）
+                # P0-Value剪枝：Expansion剪枝
                 # 先评估当前节点的value，如果过低则不展开子节点
                 leaf_value = self._evaluate_leaf(
                     node, sim_balls, sim_table, player_targets,
@@ -889,6 +891,9 @@ class MCTS:
                 # 再取比例保留数量和最大保留数量的最小值
                 keep_count = min(ratio_keep_count, self.action_max_keep_count)
                 
+                # 修复：Expansion阶段filtered_actions ≤ 5
+                keep_count = min(keep_count, 5)
+                
                 filtered_actions = [action for action, dist in action_distances[:keep_count]]
                 
                 # 5. Value + 人工reward混合筛选（使用动作缓存和批量化推理）
@@ -920,7 +925,7 @@ class MCTS:
                 # 对缓存未命中的动作进行物理仿真
                 for action in cache_misses:
                     # P0-3优化：在deepcopy前检查超时
-                    if time.time() - start_time > self.max_search_time:
+                    if time.time() > deadline:
                         time_exceeded = True
                         break
                     
@@ -930,7 +935,7 @@ class MCTS:
                     last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in temp_balls.items()}
                     
                     # P0-3优化：在simulate_action前检查超时
-                    if time.time() - start_time > self.max_search_time:
+                    if time.time() > deadline:
                         time_exceeded = True
                         break
                     
@@ -955,8 +960,8 @@ class MCTS:
                     
                     is_black_eight_foul = False
                     if (cue_in_pocket and eight_in_pocket) or (eight_in_pocket and has_non_eight_targets_left):
-                        # 黑八违规，直接给极值惩罚
-                        reward = -500
+                        # 黑八违规，设置标志但不直接修改reward
+                        # reward将在后续被归一化处理
                         is_black_eight_foul = True
                     
                     # 计算next_state_seq
@@ -1024,6 +1029,12 @@ class MCTS:
                     
                     # 使用action_id作为键，而不是action字典
                     model_value = model_values[action_id]
+                    
+                    # ✅ 修复：reward / model_value 视角统一
+                    # reward是current_player视角，model_value是root_player视角
+                    # 在混合前，必须统一到root_player视角
+                    if current_player != root_player:
+                        reward = -reward
                     
                     # 归一化reward到[-1, 1]范围
                     if reward > 150:  # 黑八胜利
@@ -1148,10 +1159,14 @@ class MCTS:
             bid in balls and balls[bid].state.s != 4 for bid in non_eight_targets
         )
         
-        # 即时判负：返回-500表示输局，与物理模拟中的极值惩罚保持一致
+        # ✅ 修复：Value语义统一 - 严格使用[-1, 1]范围
         # 从root_player视角判断：如果root_player提前打进黑八或同时打进母球和黑八，则输
         if (cue_in_pocket and eight_in_pocket) or (eight_in_pocket and has_non_eight_targets_left):
-            return -500.0
+            return -1.0  # 输局，严格使用[-1, 1]范围
+        
+        # 检查是否赢局：黑八合法入袋
+        if eight_in_pocket and not has_non_eight_targets_left:
+            return 1.0  # 赢局，严格使用[-1, 1]范围
         
         # ========== 2. 深度截断 ==========
         if depth >= remaining_hits:
