@@ -50,11 +50,11 @@ class MCTSNode:
 class MCTS:
     def __init__(self,
                  model,
-                 n_simulations=150,
+                 n_simulations=100,
                  c_puct=1.414,
-                 max_depth=4,
-                 max_search_time=15.0,
-                 action_keep_ratio=2/3,
+                 max_depth=5,
+                 max_search_time=30.0,
+                 action_keep_ratio=1/2,
                  device="cuda" if torch.cuda.is_available() else "cpu"):
         self.model = model
         self.n_simulations = n_simulations
