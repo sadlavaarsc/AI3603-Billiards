@@ -416,6 +416,19 @@ class MCTS:
         # 创建根节点
         root = MCTSNode(state_seq)
         
+        # 创建动作→仿真结果缓存（P0-1优化：一次action在一次search中最多只允许一次完整物理仿真）
+        action_cache = {}
+        # 缓存结构：
+        # key: action_key = tuple(sorted(action.items()))
+        # value: {
+        #     'shot': 物理仿真结果,
+        #     'raw_reward': 原始奖励,
+        #     'next_state_vec': 下一个状态向量,
+        #     'is_black_eight_foul': 是否黑八违规,
+        #     'cue_in_pocket': 母球是否进袋,
+        #     'eight_in_pocket': 黑八是否进袋
+        # }
+        
         # 1️⃣ 启发式生成候选动作
         candidate_actions = self.generate_heuristic_actions(balls, player_targets[root_player], table)
         
@@ -470,11 +483,43 @@ class MCTS:
         action_values = []
         alpha = 0.5  # value与reward的加权系数
         
+        # 收集所有需要评估的next_state_seq，用于批量化推理（P0-2优化）
+        state_seqs_to_evaluate = []
+        action_to_eval_idx = {}  # 记录动作到评估索引的映射
+        cache_misses = []  # 记录需要进行物理仿真的动作
+        
         for action in filtered_actions:
+            # P1-2优化：生成更高效的action_id（直接使用元组，不排序）
+            action_id = (action['V0'], action['phi'], action['theta'], action['a'], action['b'])
+            
+            if action_id not in action_cache:
+                # 动作不在缓存中，需要进行物理仿真
+                cache_misses.append(action)
+            else:
+                # 动作在缓存中，直接使用缓存结果
+                cached = action_cache[action_id]
+                
+                # 计算next_state_seq
+                next_state_seq = root.state_seq[1:] + [cached['next_state_vec']]
+                state_seqs_to_evaluate.append(next_state_seq)
+                action_to_eval_idx[action] = len(state_seqs_to_evaluate) - 1
+        
+        # 对缓存未命中的动作进行物理仿真
+        for action in cache_misses:
+            # P0-3优化：在deepcopy前检查超时
+            if time.time() - start_time > self.max_search_time:
+                time_exceeded = True
+                break
+            
             # 进行快速物理模拟
             sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
             sim_table = copy.deepcopy(table)
             last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in sim_balls.items()}
+            
+            # P0-3优化：在simulate_action前检查超时
+            if time.time() - start_time > self.max_search_time:
+                time_exceeded = True
+                break
             
             shot = self.simulate_action(sim_balls, sim_table, action)
             if shot is None:
@@ -495,9 +540,11 @@ class MCTS:
                 bid in shot.balls and shot.balls[bid].state.s != 4 for bid in non_eight_targets
             )
             
+            is_black_eight_foul = False
             if (cue_in_pocket and eight_in_pocket) or (eight_in_pocket and has_non_eight_targets_left):
                 # 黑八违规，直接给极值惩罚
                 reward = -500
+                is_black_eight_foul = True
             
             # 计算next_state_seq
             new_state_vec = self._balls_state_to_81(
@@ -505,13 +552,58 @@ class MCTS:
                 my_targets=player_targets[root_player],
                 table=shot.table
             )
-            next_state_seq = root.state_seq[1:] + [new_state_vec]
             
-            # 获取模型value
-            state_tensor = self._state_seq_to_tensor(next_state_seq).unsqueeze(0).to(self.device)
-            with torch.no_grad():
-                out = self.model(state_tensor)
-                model_value = out["value_output"].item()
+            # P1-2优化：使用更高效的action_id作为缓存key
+            action_id = (action['V0'], action['phi'], action['theta'], action['a'], action['b'])
+            action_cache[action_id] = {
+                'shot': shot,
+                'raw_reward': reward,
+                'next_state_vec': new_state_vec,
+                'is_black_eight_foul': is_black_eight_foul,
+                'cue_in_pocket': cue_in_pocket,
+                'eight_in_pocket': eight_in_pocket
+            }
+            
+            # 计算next_state_seq用于模型评估
+            next_state_seq = root.state_seq[1:] + [new_state_vec]
+            state_seqs_to_evaluate.append(next_state_seq)
+            action_to_eval_idx[action] = len(state_seqs_to_evaluate) - 1
+        
+        # 批量化模型推理（P0-2优化）
+        model_values = {}
+        if state_seqs_to_evaluate:
+            # P0-3优化：在模型推理前检查超时
+            if time.time() - start_time > self.max_search_time:
+                time_exceeded = True
+            else:
+                # 将所有状态序列转换为张量并批量化
+                state_tensors = []
+                for seq in state_seqs_to_evaluate:
+                    state_tensor = self._state_seq_to_tensor(seq)
+                    state_tensors.append(state_tensor)
+                
+                batch_state_tensor = torch.stack(state_tensors, dim=0).to(self.device)
+                
+                with torch.no_grad():
+                    out = self.model(batch_state_tensor)
+                
+                batch_value_outputs = out["value_output"].cpu().numpy()
+                
+                # 将批量化结果映射回动作
+                for action, idx in action_to_eval_idx.items():
+                    model_values[action] = batch_value_outputs[idx][0]
+        
+        # 计算混合价值
+        for action in filtered_actions:
+            # P1-2优化：使用更高效的action_id
+            action_id = (action['V0'], action['phi'], action['theta'], action['a'], action['b'])
+            
+            if action_id not in action_cache:
+                continue
+            
+            cached = action_cache[action_id]
+            reward = cached['raw_reward']
+            model_value = model_values[action]
             
             # 归一化reward到[-1, 1]范围
             # 基于reward的实际范围进行归一化
@@ -583,6 +675,14 @@ class MCTS:
             # 初始化current_state_seq，避免作用域不安全问题
             current_state_seq = node.state_seq
             
+            # P1-3优化：缓存当前阶段的球目标和黑八阶段标志
+            current_targets = player_targets[current_player]
+            non_eight_targets = [bid for bid in current_targets if bid != '8']
+            has_non_eight_targets_left = any(
+                bid in sim_balls and sim_balls[bid].state.s != 4 for bid in non_eight_targets
+            )
+            is_legal_eight_ball_stage = (len([bid for bid in current_targets if bid in sim_balls and sim_balls[bid].state.s != 4]) == 1 and current_targets[0] == '8')
+            
             while node.is_expanded and node.children and current_depth < current_max_depth:
                 # 选择UCB分数最高的子节点
                 node = node.select_child(self.c_puct)
@@ -610,9 +710,8 @@ class MCTS:
                     my_targets=player_targets[current_player],
                     table=sim_table
                 )
-                current_state_seq = node.state_seq[1:] + [new_state_vec]
-                # 将更新后的state_seq写回node，确保子节点继承正确状态
-                node.state_seq = current_state_seq
+                # P1-1优化：node.state_seq视为只读，只更新局部current_state_seq
+                current_state_seq = current_state_seq[1:] + [new_state_vec]
                 
                 # 检查是否需要切换玩家
                 # 1. 计算首球碰撞和犯规情况
@@ -625,10 +724,13 @@ class MCTS:
                             first_contact = others[0]
                             break
                 
-                # 首球犯规判定：考虑合法黑8阶段
-                # 如果是合法黑8阶段（只剩黑8一个球要打），击中黑8是合法的
-                remaining_targets = [bid for bid in player_targets[current_player] if bid in shot.balls and shot.balls[bid].state.s != 4]
-                is_legal_eight_ball_stage = (len(remaining_targets) == 1 and remaining_targets[0] == '8')
+                # P1-3优化：更新阶段标志
+                current_targets = player_targets[current_player]
+                non_eight_targets = [bid for bid in current_targets if bid != '8']
+                has_non_eight_targets_left = any(
+                    bid in shot.balls and shot.balls[bid].state.s != 4 for bid in non_eight_targets
+                )
+                is_legal_eight_ball_stage = (len([bid for bid in current_targets if bid in shot.balls and shot.balls[bid].state.s != 4]) == 1 and current_targets[0] == '8')
                 
                 # 首球犯规判定
                 if first_contact is None:
@@ -638,7 +740,7 @@ class MCTS:
                     foul_first_hit = first_contact != '8'
                 else:
                     # 正常阶段，必须击中目标球
-                    foul_first_hit = first_contact not in player_targets[current_player]
+                    foul_first_hit = first_contact not in current_targets
                 
                 # 2. 计算碰库犯规
                 cue_hit_cushion = any(
@@ -758,15 +860,47 @@ class MCTS:
                 
                 filtered_actions = [action for action, dist in action_distances[:keep_count]]
                 
-                # 5. Value + 人工reward混合筛选（与根节点相同逻辑）
+                # 5. Value + 人工reward混合筛选（使用动作缓存和批量化推理）
                 action_values = []
                 alpha = 0.5  # value与reward的加权系数
                 
+                # 收集所有需要评估的next_state_seq，用于批量化推理
+                state_seqs_to_evaluate = []
+                action_to_eval_idx = {}  # 记录动作到评估索引的映射
+                cache_misses = []  # 记录需要进行物理仿真的动作
+                
                 for action in filtered_actions:
+                    # P1-2优化：使用更高效的action_id
+                    action_id = (action['V0'], action['phi'], action['theta'], action['a'], action['b'])
+                    
+                    if action_id not in action_cache:
+                        # 动作不在缓存中，需要进行物理仿真
+                        cache_misses.append(action)
+                    else:
+                        # 动作在缓存中，直接使用缓存结果
+                        cached = action_cache[action_id]
+                        
+                        # 计算next_state_seq
+                        next_state_seq = current_state_seq[1:] + [cached['next_state_vec']]
+                        state_seqs_to_evaluate.append(next_state_seq)
+                        action_to_eval_idx[action] = len(state_seqs_to_evaluate) - 1
+                
+                # 对缓存未命中的动作进行物理仿真
+                for action in cache_misses:
+                    # P0-3优化：在deepcopy前检查超时
+                    if time.time() - start_time > self.max_search_time:
+                        time_exceeded = True
+                        break
+                    
                     # 进行快速物理模拟
                     temp_balls = {bid: copy.deepcopy(ball) for bid, ball in sim_balls.items()}
                     temp_table = copy.deepcopy(sim_table)
                     last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in temp_balls.items()}
+                    
+                    # P0-3优化：在simulate_action前检查超时
+                    if time.time() - start_time > self.max_search_time:
+                        time_exceeded = True
+                        break
                     
                     shot = self.simulate_action(temp_balls, temp_table, action)
                     if shot is None:
@@ -787,9 +921,11 @@ class MCTS:
                         bid in shot.balls and shot.balls[bid].state.s != 4 for bid in non_eight_targets
                     )
                     
+                    is_black_eight_foul = False
                     if (cue_in_pocket and eight_in_pocket) or (eight_in_pocket and has_non_eight_targets_left):
                         # 黑八违规，直接给极值惩罚
                         reward = -500
+                        is_black_eight_foul = True
                     
                     # 计算next_state_seq
                     new_state_vec = self._balls_state_to_81(
@@ -797,13 +933,63 @@ class MCTS:
                         my_targets=player_targets[current_player],
                         table=shot.table
                     )
-                    next_state_seq = current_state_seq[1:] + [new_state_vec]
                     
-                    # 获取模型value
-                    state_tensor = self._state_seq_to_tensor(next_state_seq).unsqueeze(0).to(self.device)
-                    with torch.no_grad():
-                        out = self.model(state_tensor)
-                        model_value = out["value_output"].item()
+                    # P1-2优化：使用更高效的action_id作为缓存key
+                    action_id = (action['V0'], action['phi'], action['theta'], action['a'], action['b'])
+                    action_cache[action_id] = {
+                        'shot': shot,
+                        'raw_reward': reward,
+                        'next_state_vec': new_state_vec,
+                        'is_black_eight_foul': is_black_eight_foul,
+                        'cue_in_pocket': cue_in_pocket,
+                        'eight_in_pocket': eight_in_pocket
+                    }
+                    
+                    # 计算next_state_seq用于模型评估
+                    next_state_seq = current_state_seq[1:] + [new_state_vec]
+                    state_seqs_to_evaluate.append(next_state_seq)
+                    action_to_eval_idx[action] = len(state_seqs_to_evaluate) - 1
+                
+                # 批量化模型推理
+                model_values = {}
+                if state_seqs_to_evaluate:
+                    # P0-3优化：在模型推理前检查超时
+                    if time.time() - start_time > self.max_search_time:
+                        time_exceeded = True
+                    else:
+                        # 将所有状态序列转换为张量并批量化
+                        state_tensors = []
+                        for seq in state_seqs_to_evaluate:
+                            state_tensor = self._state_seq_to_tensor(seq)
+                            state_tensors.append(state_tensor)
+                        
+                        batch_state_tensor = torch.stack(state_tensors, dim=0).to(self.device)
+                        
+                        with torch.no_grad():
+                            out = self.model(batch_state_tensor)
+                        
+                        batch_value_outputs = out["value_output"].cpu().numpy()
+                        
+                        # 将批量化结果映射回动作
+                        for action, idx in action_to_eval_idx.items():
+                            model_values[action] = batch_value_outputs[idx][0]
+                
+                # 计算混合价值
+                for action in filtered_actions:
+                    # P1-2优化：使用更高效的action_id
+                    action_id = (action['V0'], action['phi'], action['theta'], action['a'], action['b'])
+                    
+                    if action_id not in action_cache:
+                        continue
+                    
+                    cached = action_cache[action_id]
+                    reward = cached['raw_reward']
+                    
+                    # 检查模型值是否存在
+                    if action not in model_values:
+                        continue
+                    
+                    model_value = model_values[action]
                     
                     # 归一化reward到[-1, 1]范围
                     if reward > 150:  # 黑八胜利
