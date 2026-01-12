@@ -71,13 +71,13 @@ class MCTS:
         1: {
             "candidate_samples": 1,
             "policy_keep": 0.2,
-            "max_children": 20,
+            "max_children": 1,
             "allow_strong_ai": True
         },
         2: {
             "candidate_samples": 1,
             "policy_keep": 0.15,
-            "max_children": 5,
+            "max_children": 1,
             "allow_strong_ai": True
         },
         3: {  # 极深层
@@ -95,7 +95,7 @@ class MCTS:
                  max_depth=5,
                  max_search_time=30.0,
                  action_keep_ratio=1/2,
-                 action_max_keep_count=20,  # 最大保留动作数量
+                 action_max_keep_count=50,  # 最大保留动作数量
                  # Value剪枝相关参数
                  value_prune_threshold=-0.6,  # 绝对阈值剪枝阈值
                  value_relative_prune_ratio=0.3,  # 相对剪枝比例（剪掉bottom X%）
