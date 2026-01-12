@@ -625,25 +625,113 @@ class MCTS:
             
             action = candidate_actions[idx]
             
-            # 2. 模拟动作，获取新状态
+            # 2. Simulation (带噪声)
             last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
             shot = self.simulate_action(balls, table, action)
             
+            # 3. Evaluation
             if shot is None:
-                value = -500.0
+                raw_reward = -500.0
+                value = raw_reward / 650.0  # 归一化
             else:
-                # 3. 调用_expand_and_evaluate进行多层评估
-                # 生成新的状态向量
-                new_state_vec = self._balls_state_to_81(
-                    shot.balls,
-                    my_targets=player_targets[root_player],
-                    table=table
-                )
-                new_state_seq = root.state_seq[1:] + [new_state_vec]
-                child_node = MCTSNode(new_state_seq, parent=root)
+                # 计算物理模拟奖励
+                raw_reward = self.analyze_shot_for_reward(shot, last_state_snapshot, player_targets[root_player])
+                normalized_reward = (raw_reward - (-500)) / 650.0
+                normalized_reward = np.clip(normalized_reward, 0.0, 1.0)
                 
-                # 调用_expand_and_evaluate进行递归评估，传递模拟后的结果
-                value = self._expand_and_evaluate(child_node, shot.balls, table, player_targets, root_player, 1, current_max_depth)
+                # 检查是否已经处于输了的状态
+                # 检查白球是否进袋
+                cue_ball = shot.balls.get('cue')
+                cue_in_pocket = cue_ball and cue_ball.state.s == 4
+                
+                # 检查黑八是否进袋
+                eight_ball = shot.balls.get('8')
+                eight_in_pocket = eight_ball and eight_ball.state.s == 4
+                
+                # 检查自己的目标球是否都已经进袋（除了黑八）
+                my_targets = player_targets[root_player]
+                non_eight_targets = [bid for bid in my_targets if bid != '8']
+                has_non_eight_targets_left = any(bid in shot.balls and shot.balls[bid].state.s != 4 for bid in non_eight_targets)
+                
+                # 输的情况：
+                # 1. 白球和黑八同时进袋
+                # 2. 黑八进袋但自己还有非黑八目标球未进
+                game_over = (cue_in_pocket and eight_in_pocket) or (eight_in_pocket and has_non_eight_targets_left)
+                
+                if game_over:
+                    # 游戏结束，下回合权重为0
+                    future_value = 0.0
+                else:
+                    # 4. 对模拟后的局面调用value网络，进行多层评估
+                    # 生成新的状态向量
+                    new_state_vec = self._balls_state_to_81(
+                        shot.balls,
+                        my_targets=player_targets[root_player],
+                        table=table
+                    )
+                    new_state_seq = root.state_seq[1:] + [new_state_vec]
+                    child_node = MCTSNode(new_state_seq, parent=root)
+                    
+                    # 计算首球碰撞和犯规情况，判断是否需要切换玩家
+                    first_contact_ball_id = None
+                    foul_first_hit = False
+                    valid_ball_ids = {'1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15'}
+                    
+                    for e in shot.events:
+                        et = str(e.event_type).lower()
+                        ids = list(e.ids) if hasattr(e, 'ids') else []
+                        if ('cushion' not in et) and ('pocket' not in et) and ('cue' in ids):
+                            other_ids = [i for i in ids if i != 'cue' and i in valid_ball_ids]
+                            if other_ids:
+                                first_contact_ball_id = other_ids[0]
+                                break
+                    
+                    # 首球犯规判定
+                    if first_contact_ball_id is None:
+                        foul_first_hit = True
+                    else:
+                        foul_first_hit = first_contact_ball_id not in player_targets[root_player]
+                    
+                    # 计算碰库犯规
+                    cue_hit_cushion = False
+                    target_hit_cushion = False
+                    
+                    for e in shot.events:
+                        et = str(e.event_type).lower()
+                        ids = list(e.ids) if hasattr(e, 'ids') else []
+                        if 'cushion' in et:
+                            if 'cue' in ids:
+                                cue_hit_cushion = True
+                            if first_contact_ball_id is not None and first_contact_ball_id in ids:
+                                target_hit_cushion = True
+                    
+                    new_pocketed = [bid for bid, b in shot.balls.items() if b.state.s == 4 and last_state_snapshot[bid].state.s != 4]
+                    own_pocketed = [bid for bid in new_pocketed if bid in player_targets[root_player]]
+                    cue_pocketed = "cue" in new_pocketed
+                    
+                    # 碰库犯规：没有进球且没有碰到库边
+                    foul_no_rail = len(new_pocketed) == 0 and first_contact_ball_id is not None and (not cue_hit_cushion) and (not target_hit_cushion)
+                    
+                    # 判断是否需要切换玩家
+                    # 切换玩家的条件：
+                    # a. 白球进袋
+                    # b. 首球犯规
+                    # c. 碰库犯规
+                    # d. 没有己方球进袋
+                    switch_player = cue_pocketed or foul_first_hit or foul_no_rail or len(own_pocketed) == 0
+                    
+                    # 确定下一个玩家
+                    next_player = 'B' if root_player == 'A' else 'A' if switch_player else root_player
+                    
+                    # 使用value网络评估后续局面
+                    future_value = self._expand_and_evaluate(child_node, shot.balls, table, player_targets, next_player, 1, current_max_depth)
+                    
+                    # 如果切换了玩家，对手的value对当前玩家来说是负的，需要反转
+                    if switch_player:
+                        future_value = -future_value
+                    
+                # 计算总value：当前动作奖励 + 后续局面value（带衰减）
+                value = normalized_reward + future_value * 0.9  # 衰减因子
             
             # 5. Backpropagation
             N[idx] += 1
