@@ -103,12 +103,13 @@ def filter_shot(shot, shot_index, match_data):
         bool: True表示样本应该被保留，False表示样本应该被过滤掉
     """
     try:
+        '''
         # 1. 保留整场比赛第一杆，且这一杆是有效杆（打中了己方球，甚至打进了己方球）
         if shot_index == 0:
             # 检查是否是有效杆
             result = shot.get('result', {})
             # 如果打中了己方球或打进了己方球，返回True（保留）
-            if result.get('ME_INTO_POCKET', []) or not result.get('FOUL_FIRST_HIT', False):
+            if result.get('ME_INTO_POCKET', []):
                 return True
         '''
         # 2. 保留己方只剩下黑八没有打中，且这回合动作之后打进了黑八
@@ -117,11 +118,19 @@ def filter_shot(shot, shot_index, match_data):
         result = shot.get('result', {})
         
         # 检查是否只剩下黑八
-        if len(my_targets) == 1 and my_targets[0] == '8':
+        # 检查my_targets是否状态全都是是4（进袋）
+        flag=True
+        for target in my_targets:
+            if shot['pre_state']['balls'][target]['s'] != 4:
+                flag=False
+                break
+        return flag#如果只剩下黑八，返回True，特训黑八残局
+        '''if not flag:
             # 检查是否打进了黑八
-            if '8' in result.get('ME_INTO_POCKET', []):
-                return True
-        '''
+            BLACK_BALL_INTO_POCKET = result.get('BLACK_BALL_INTO_POCKET', [])
+            if BLACK_BALL_INTO_POCKET:
+                return True'''
+        
         # 其他情况都删掉
         return False
     except Exception as e:
