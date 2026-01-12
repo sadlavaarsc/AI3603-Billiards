@@ -625,33 +625,25 @@ class MCTS:
             
             action = candidate_actions[idx]
             
-            # 2. 使用模型生成value
-            state_tensor = self._state_seq_to_tensor(root.state_seq)
-            state_tensor = state_tensor.unsqueeze(0).to(self.device)
-            
-            with torch.no_grad():
-                out = self.model(state_tensor)
-                value_output = out["value_output"].item()
-            
-            # 3. Simulation (带噪声)
+            # 2. 模拟动作，获取新状态
             last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
             shot = self.simulate_action(balls, table, action)
             
-            # 4. Evaluation
             if shot is None:
-                raw_reward = -500.0
+                value = -500.0
             else:
-                raw_reward = self.analyze_shot_for_reward(shot, last_state_snapshot, player_targets[root_player])
-            
-            # 归一化奖励
-            normalized_reward = (raw_reward - (-500)) / 650.0
-            normalized_reward = np.clip(normalized_reward, 0.0, 1.0)
-            
-            # 初始深度为0，所以物理模拟权重更大
-            depth = 0
-            # 避免除0错误
-            depth_factor = depth / current_max_depth if current_max_depth > 0 else 1.0
-            value = depth_factor * value_output + (1 - depth_factor) * normalized_reward
+                # 3. 调用_expand_and_evaluate进行多层评估
+                # 生成新的状态向量
+                new_state_vec = self._balls_state_to_81(
+                    shot.balls,
+                    my_targets=player_targets[root_player],
+                    table=table
+                )
+                new_state_seq = root.state_seq[1:] + [new_state_vec]
+                child_node = MCTSNode(new_state_seq, parent=root)
+                
+                # 调用_expand_and_evaluate进行递归评估，传递模拟后的结果
+                value = self._expand_and_evaluate(child_node, shot.balls, table, player_targets, root_player, 1, current_max_depth)
             
             # 5. Backpropagation
             N[idx] += 1
