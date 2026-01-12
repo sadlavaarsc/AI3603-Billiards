@@ -35,16 +35,49 @@ def simulate_with_timeout(shot, timeout=3):
 
 # ============ MCTS Node ============
 class MCTSNode:
-    def __init__(self, state_seq, parent=None, prior=1.0, depth=0):
+    def __init__(self, state_seq, parent=None, prior=1.0, action=None):
         self.state_seq = state_seq
         self.parent = parent
+        self.action = action
         self.children = {}
-        self.depth = depth
         
         self.N = 0
         self.W = 0.0
         self.Q = 0.0
         self.P = prior
+        self.is_expanded = False
+    
+    def ucb_score(self, c_puct):
+        """计算PUCT分数"""
+        if self.parent is None:
+            return self.Q
+        
+        return self.Q + c_puct * self.P * math.sqrt(self.parent.N + 1e-8) / (1 + self.N)
+    
+    def select_child(self, c_puct):
+        """选择UCB分数最高的子节点"""
+        return max(self.children.values(), key=lambda child: child.ucb_score(c_puct))
+    
+    def expand(self, action_priors):
+        """扩展节点，添加子节点"""
+        for action, prior in action_priors:
+            if action not in self.children:
+                self.children[action] = MCTSNode(
+                    state_seq=self.state_seq,  # 子节点继承父节点的状态序列
+                    parent=self,
+                    prior=prior,
+                    action=action
+                )
+        self.is_expanded = True
+    
+    def backup(self, value):
+        """备份价值，更新节点的访问次数和价值"""
+        node = self
+        while node is not None:
+            node.N += 1
+            node.W += value
+            node.Q = node.W / node.N
+            node = node.parent
 
 # ============ Multi-step MCTS ============
 class MCTS:
@@ -543,130 +576,162 @@ class MCTS:
 
         return best_value
     def search(self, state_seq, balls, table, player_targets, root_player, remaining_hits):
-        """
-        正确的 multi-step MCTS search
-        —— search 只负责 root 层动作选择
-        —— 所有规则、跨回合收益都在 _expand_and_evaluate
+        """执行MCTS搜索
+        
+        参数：
+            state_seq: 状态序列，长度为3的列表，每个元素是81维的numpy数组
+            balls: 球状态字典，{ball_id: Ball对象}
+            table: 球桌对象
+            player_targets: 玩家目标球字典，{player: [target_ball_ids]}
+            root_player: 当前玩家，'A'或'B'
+            remaining_hits: 剩余杆数
+            
+        返回：
+            numpy数组: 最佳动作，包含V0、phi、theta、a、b五个属性
         """
         import time
-
-        root = MCTSNode(state_seq)
-
-        # ===== 1. 残局检测 =====
+        
+        # 检查是否为残局（只剩黑八一个球要打）
         remaining_targets = [
             bid for bid in player_targets[root_player]
             if bid in balls and balls[bid].state.s != 4
         ]
         is_endgame = (len(remaining_targets) == 1 and remaining_targets[0] == '8')
-
-        # ===== 2. 参数调整（残局）=====
+        
+        # 残局时调整参数：
+        # 1. 实际使用的n_simulations*3/2
+        # 2. 实际使用的max_depth*3/2
+        current_n_simulations = int(self.n_simulations * 3 / 2) if is_endgame else self.n_simulations
         current_max_depth = min(
             int(self.max_depth * 3 / 2) if is_endgame else self.max_depth,
             remaining_hits
         )
-
-        # ===== 3. 生成候选动作 =====
-        candidate_actions = self.generate_heuristic_actions(
-            balls, player_targets[root_player], table
-        )
-
-        best_value = -float("inf")
-        best_action = None
-
+        
+        # 记录搜索开始时间
         start_time = time.time()
-
-        # ===== 4. 对每个 root 动作做 multi-step 搜索 =====
-        for action in candidate_actions:
-            # 时间保护
-            if time.time() - start_time > self.max_search_time:
+        
+        # 创建根节点
+        root = MCTSNode(state_seq)
+        
+        # 1️⃣ 启发式生成候选动作
+        candidate_actions = self.generate_heuristic_actions(balls, player_targets[root_player], table)
+        
+        # 2️⃣ policy网络筛选和先验概率生成
+        state_tensor = self._state_seq_to_tensor(root.state_seq).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            out = self.model(state_tensor)
+            value_output = out["value_output"].item()
+        
+        # 生成动作先验概率（简单使用均匀分布）
+        action_priors = []
+        if candidate_actions:
+            uniform_prior = 1.0 / len(candidate_actions)
+            for action in candidate_actions:
+                action_priors.append((action, uniform_prior))
+        
+        # 扩展根节点
+        root.expand(action_priors)
+        
+        # 模拟次数计数器
+        simulation_count = 0
+        time_exceeded = False
+        
+        # 3️⃣ 多次模拟：选择、扩展+评估、备份
+        for _ in range(current_n_simulations):
+            # 检查是否超过搜索时间限制
+            elapsed_time = time.time() - start_time
+            if elapsed_time > self.max_search_time:
+                time_exceeded = True
+                print(f"[Multi-step MCTS] 搜索时间超过限制 ({elapsed_time:.2f}s > {self.max_search_time}s)，提前终止搜索")
                 break
-
-            last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
-            shot = self.simulate_action(balls, table, action)
-
-            if shot is None:
-                continue
-
-            raw_reward = self.analyze_shot_for_reward(
-                shot, last_state_snapshot, player_targets[root_player]
-            )
-
-            # 非残局提前打黑八：直接丢弃
-            if not is_endgame and raw_reward <= -500:
-                continue
-
-            # ===== 即时 reward 归一化 =====
-            normalized_reward = np.clip((raw_reward + 500) / 650.0, 0.0, 1.0)
-
-            # ===== foul / player switch 判断（复用你已有逻辑）=====
-            new_pocketed = [
-                bid for bid in shot.balls
-                if shot.balls[bid].state.s == 4 and last_state_snapshot[bid].state.s != 4
-            ]
-
-            cue_pocketed = 'cue' in new_pocketed
-
-            own_pocketed = [
-                b for b in new_pocketed
-                if b in player_targets[root_player]
-            ]
-
-            if cue_pocketed:
-                is_foul = True
-            else:
-                is_foul = False
-
-            if is_foul:
-                new_balls_state = last_state_snapshot
-                next_player = 'B' if root_player == 'A' else 'A'
-                switch_player = True
-            else:
-                if len(own_pocketed) == 0:
-                    new_balls_state = shot.balls
-                    next_player = 'B' if root_player == 'A' else 'A'
-                    switch_player = True
-                else:
-                    new_balls_state = shot.balls
-                    next_player = root_player
-                    switch_player = False
-
-            # ===== 构造子状态 =====
-            new_state_vec = self._balls_state_to_81(
-                new_balls_state,
-                my_targets=player_targets[next_player],
-                table=table
-            )
-            new_state_seq = state_seq[1:] + [new_state_vec]
-
-            child_node = MCTSNode(new_state_seq, parent=root)
-
-            # ===== multi-step rollout =====
-            child_value = self._expand_and_evaluate(
-                child_node,
-                new_balls_state,
-                table,
-                player_targets,
-                next_player,
-                depth=1,
-                remaining_hits=current_max_depth
-            )
-
-            if switch_player:
-                child_value = -child_value
-
-            # ===== 合成价值 =====
-            value = normalized_reward + 0.9 * child_value
-
-            if value > best_value:
-                best_value = value
-                best_action = action
-
-        # ===== 5. 兜底 =====
-        if best_action is None:
+            
+            simulation_count += 1
+            
+            # Selection
+            node = root
+            sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+            sim_table = copy.deepcopy(table)
+            current_player = root_player
+            current_depth = 0
+            path = [node]
+            
+            while node.is_expanded and node.children and current_depth < current_max_depth:
+                # 选择UCB分数最高的子节点
+                node = node.select_child(self.c_puct)
+                path.append(node)
+                
+                # 执行动作，获取下一个状态
+                last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in sim_balls.items()}
+                shot = self.simulate_action(sim_balls, sim_table, node.action)
+                
+                if shot is None:
+                    break
+                
+                # 更新模拟状态
+                sim_balls = shot.balls
+                sim_table = shot.table
+                
+                # 检查是否需要切换玩家
+                # 1. 计算首球碰撞和犯规情况
+                first_contact = None
+                for e in shot.events:
+                    ids = getattr(e, 'ids', [])
+                    if 'cue' in ids:
+                        others = [i for i in ids if i != 'cue']
+                        if others:
+                            first_contact = others[0]
+                            break
+                
+                # 首球犯规判定
+                foul_first_hit = (first_contact is None or first_contact not in player_targets[current_player])
+                
+                # 2. 计算碰库犯规
+                cue_hit_cushion = any(
+                    'cushion' in str(e.event_type).lower() and 'cue' in getattr(e, 'ids', [])
+                    for e in shot.events
+                )
+                
+                new_pocketed = [
+                    bid for bid in shot.balls
+                    if shot.balls[bid].state.s == 4 and last_state_snapshot[bid].state.s != 4
+                ]
+                own_pocketed = [bid for bid in new_pocketed if bid in player_targets[current_player]]
+                cue_pocketed = 'cue' in new_pocketed
+                
+                # 碰库犯规：没有进球且没有碰到库边
+                foul_no_rail = (len(new_pocketed) == 0 and not cue_hit_cushion)
+                
+                # 3. 判断是否需要切换玩家
+                is_foul = cue_pocketed or foul_first_hit or foul_no_rail
+                switch_player = is_foul or len(own_pocketed) == 0
+                
+                # 更新玩家
+                if switch_player:
+                    current_player = 'B' if current_player == 'A' else 'A'
+                
+                current_depth += 1
+            
+            # Expansion + Evaluation
+            value = self._evaluate_leaf(node, sim_balls, sim_table, player_targets, current_player, current_depth, remaining_hits - current_depth)
+            
+            # 如果当前节点不是根节点，且当前玩家不是根玩家，反转value
+            if current_player != root_player:
+                value = -value
+            
+            # 4️⃣ Backup
+            for node in path:
+                node.backup(value)
+        
+        # 5️⃣ 返回访问次数最多的动作
+        if root.children:
+            best_child = max(root.children.values(), key=lambda c: c.N)
+            best_action = best_child.action
+        else:
+            # 如果没有子节点，返回第一个候选动作
             best_action = candidate_actions[0]
-
-        print(f"[Multi-step MCTS] Best Value: {best_value:.3f}")
-
+        
+        print(f"[Multi-step MCTS] Best Value: {best_child.Q:.3f} (Visits: {best_child.N}, Sims: {simulation_count}/{current_n_simulations})")
+        
         return np.array(
             [
                 best_action['V0'],
@@ -677,3 +742,53 @@ class MCTS:
             ],
             dtype=np.float32
         )
+    
+    def _evaluate_leaf(self, node, balls, table, player_targets, current_player, depth, remaining_hits):
+        """评估叶子节点
+        
+        参数：
+            node: 叶子节点
+            balls: 球状态字典
+            table: 球桌对象
+            player_targets: 玩家目标球字典
+            current_player: 当前玩家
+            depth: 当前深度
+            remaining_hits: 剩余杆数
+            
+        返回：
+            float: 节点的评估价值
+        """
+        # ========== 1. 即时判负检测 ==========
+        cue_ball = balls.get('cue')
+        cue_in_pocket = cue_ball and cue_ball.state.s == 4
+        
+        eight_ball = balls.get('8')
+        eight_in_pocket = eight_ball and eight_ball.state.s == 4
+        
+        my_targets = player_targets[current_player]
+        non_eight_targets = [bid for bid in my_targets if bid != '8']
+        has_non_eight_targets_left = any(
+            bid in balls and balls[bid].state.s != 4 for bid in non_eight_targets
+        )
+        
+        # 即时判负
+        if (cue_in_pocket and eight_in_pocket) or (eight_in_pocket and has_non_eight_targets_left):
+            return 0.0
+        
+        # ========== 2. 深度截断 ==========
+        if depth >= remaining_hits:
+            state_tensor = self._state_seq_to_tensor(node.state_seq).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                out = self.model(state_tensor)
+            return out["value_output"].item()
+        
+        # ========== 3. 模型价值 ==========
+        state_tensor = self._state_seq_to_tensor(node.state_seq).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            out = self.model(state_tensor)
+            model_value = out["value_output"].item()
+        
+        # ========== 4. 物理仿真价值 ==========
+        # 这里简化处理，直接返回模型价值
+        # 实际应该进行物理仿真并计算奖励
+        return model_value

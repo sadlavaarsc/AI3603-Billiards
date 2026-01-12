@@ -63,9 +63,7 @@ class MCTSAgent(Agent):
         model.eval()
         self.set_model(model)
     
-    def clear_buffer(self):
-        """清空状态缓冲区"""
-        self.state_buffer.clear()
+
     
     def set_simulations(self, n_simulations):
         """设置模拟次数"""
