@@ -543,119 +543,137 @@ class MCTS:
 
         return best_value
     def search(self, state_seq, balls, table, player_targets, root_player, remaining_hits):
-        """执行MCTS搜索
-        
-        参数：
-            state_seq: 状态序列，长度为3的列表，每个元素是81维的numpy数组
-            balls: 球状态字典，{ball_id: Ball对象}
-            table: 球桌对象
-            player_targets: 玩家目标球字典，{player: [target_ball_ids]}
-            root_player: 当前玩家，'A'或'B'
-            remaining_hits: 剩余杆数
-            
-        返回：
-            numpy数组: 最佳动作，包含V0、phi、theta、a、b五个属性
+        """
+        正确的 multi-step MCTS search
+        —— search 只负责 root 层动作选择
+        —— 所有规则、跨回合收益都在 _expand_and_evaluate
         """
         import time
-        
+
         root = MCTSNode(state_seq)
-        
-        # 检查是否为残局（只剩黑八一个球要打）
-        is_endgame = len(player_targets[root_player]) == 1 and player_targets[root_player][0] == '8'
-        
-        # 生成候选动作
-        candidate_actions = self.generate_heuristic_actions(balls, player_targets[root_player], table)
-        n_candidates = len(candidate_actions)
-        
-        N = np.zeros(n_candidates)
-        Q = np.zeros(n_candidates)
-        
-        # 残局时调整参数：
-        # 1. 实际使用的n_simulations*3/2
-        # 2. 实际使用的max_depth*3/2
-        current_n_simulations = int(self.n_simulations * 3 / 2) if is_endgame else self.n_simulations
-        current_max_depth = min(int(self.max_depth * 3 / 2), remaining_hits) if is_endgame else min(self.max_depth, remaining_hits)
-        
-        # 记录搜索开始时间
+
+        # ===== 1. 残局检测 =====
+        remaining_targets = [
+            bid for bid in player_targets[root_player]
+            if bid in balls and balls[bid].state.s != 4
+        ]
+        is_endgame = (len(remaining_targets) == 1 and remaining_targets[0] == '8')
+
+        # ===== 2. 参数调整（残局）=====
+        current_max_depth = min(
+            int(self.max_depth * 3 / 2) if is_endgame else self.max_depth,
+            remaining_hits
+        )
+
+        # ===== 3. 生成候选动作 =====
+        candidate_actions = self.generate_heuristic_actions(
+            balls, player_targets[root_player], table
+        )
+
+        best_value = -float("inf")
+        best_action = None
+
         start_time = time.time()
-        
-        # MCTS循环
-        simulation_count = 0
-        time_exceeded = False
-        
-        for _ in range(current_n_simulations):
-            # 检查是否超过搜索时间限制
-            elapsed_time = time.time() - start_time
-            if elapsed_time > self.max_search_time:
-                time_exceeded = True
-                print(f"[Multi-step MCTS] 搜索时间超过限制 ({elapsed_time:.2f}s > {self.max_search_time}s)，提前终止搜索")
+
+        # ===== 4. 对每个 root 动作做 multi-step 搜索 =====
+        for action in candidate_actions:
+            # 时间保护
+            if time.time() - start_time > self.max_search_time:
                 break
-            
-            simulation_count += 1
-            
-            # 1. Selection (UCB)
-            if np.sum(N) < n_candidates:
-                idx = int(np.sum(N))
-            else:
-                ucb_values = Q + self.c_puct * np.sqrt(np.log(np.sum(N) + 1) / (N + 1e-6))
-                idx = np.argmax(ucb_values)
-            
-            action = candidate_actions[idx]
-            
-            # 2. 使用模型生成value
-            state_tensor = self._state_seq_to_tensor(root.state_seq)
-            state_tensor = state_tensor.unsqueeze(0).to(self.device)
-            
-            with torch.no_grad():
-                out = self.model(state_tensor)
-                value_output = out["value_output"].item()
-            
-            # 3. Simulation (带噪声)
+
             last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
             shot = self.simulate_action(balls, table, action)
-            
-            # 4. Evaluation
+
             if shot is None:
-                raw_reward = -500.0
+                continue
+
+            raw_reward = self.analyze_shot_for_reward(
+                shot, last_state_snapshot, player_targets[root_player]
+            )
+
+            # 非残局提前打黑八：直接丢弃
+            if not is_endgame and raw_reward <= -500:
+                continue
+
+            # ===== 即时 reward 归一化 =====
+            normalized_reward = np.clip((raw_reward + 500) / 650.0, 0.0, 1.0)
+
+            # ===== foul / player switch 判断（复用你已有逻辑）=====
+            new_pocketed = [
+                bid for bid in shot.balls
+                if shot.balls[bid].state.s == 4 and last_state_snapshot[bid].state.s != 4
+            ]
+
+            cue_pocketed = 'cue' in new_pocketed
+
+            own_pocketed = [
+                b for b in new_pocketed
+                if b in player_targets[root_player]
+            ]
+
+            if cue_pocketed:
+                is_foul = True
             else:
-                raw_reward = self.analyze_shot_for_reward(shot, last_state_snapshot, player_targets[root_player])
-            
-            # 归一化奖励
-            normalized_reward = (raw_reward - (-500)) / 650.0
-            normalized_reward = np.clip(normalized_reward, 0.0, 1.0)
-            
-            # 初始深度为0，所以物理模拟权重更大
-            depth = 0
-            # 避免除0错误
-            depth_factor = depth / current_max_depth if current_max_depth > 0 else 1.0
-            value = depth_factor * value_output + (1 - depth_factor) * normalized_reward
-            
-            # 5. Backpropagation
-            N[idx] += 1
-            Q[idx] += (value - Q[idx]) / N[idx]
-        
-        # 如果时间超限，为未搜索的动作使用模型生成value
-        if time_exceeded:
-            # 使用模型为未搜索的动作生成value
-            state_tensor = self._state_seq_to_tensor(root.state_seq)
-            state_tensor = state_tensor.unsqueeze(0).to(self.device)
-            
-            with torch.no_grad():
-                out = self.model(state_tensor)
-                model_value = out["value_output"].item()
-            
-            # 为未搜索的动作设置模型value
-            for idx in range(n_candidates):
-                if N[idx] == 0:  # 未搜索的动作
-                    Q[idx] = model_value
-                    N[idx] = 1  # 标记为已处理
-        
-        # Final Decision
-        avg_rewards = Q
-        best_idx = np.argmax(avg_rewards)
-        best_action = candidate_actions[best_idx]
-        
-        print(f"[Multi-step MCTS] Best Avg Score: {avg_rewards[best_idx]:.3f} (Sims: {simulation_count}/{self.n_simulations})")
-        
-        # 转换为numpy数组返回
-        return np.array([best_action['V0'], best_action['phi'], best_action['theta'], best_action['a'], best_action['b']], dtype=np.float32)
+                is_foul = False
+
+            if is_foul:
+                new_balls_state = last_state_snapshot
+                next_player = 'B' if root_player == 'A' else 'A'
+                switch_player = True
+            else:
+                if len(own_pocketed) == 0:
+                    new_balls_state = shot.balls
+                    next_player = 'B' if root_player == 'A' else 'A'
+                    switch_player = True
+                else:
+                    new_balls_state = shot.balls
+                    next_player = root_player
+                    switch_player = False
+
+            # ===== 构造子状态 =====
+            new_state_vec = self._balls_state_to_81(
+                new_balls_state,
+                my_targets=player_targets[next_player],
+                table=table
+            )
+            new_state_seq = state_seq[1:] + [new_state_vec]
+
+            child_node = MCTSNode(new_state_seq, parent=root)
+
+            # ===== multi-step rollout =====
+            child_value = self._expand_and_evaluate(
+                child_node,
+                new_balls_state,
+                table,
+                player_targets,
+                next_player,
+                depth=1,
+                remaining_hits=current_max_depth
+            )
+
+            if switch_player:
+                child_value = -child_value
+
+            # ===== 合成价值 =====
+            value = normalized_reward + 0.9 * child_value
+
+            if value > best_value:
+                best_value = value
+                best_action = action
+
+        # ===== 5. 兜底 =====
+        if best_action is None:
+            best_action = candidate_actions[0]
+
+        print(f"[Multi-step MCTS] Best Value: {best_value:.3f}")
+
+        return np.array(
+            [
+                best_action['V0'],
+                best_action['phi'],
+                best_action['theta'],
+                best_action['a'],
+                best_action['b'],
+            ],
+            dtype=np.float32
+        )
