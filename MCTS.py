@@ -63,6 +63,7 @@ class MCTS:
                  max_depth=5,
                  max_search_time=30.0,
                  action_keep_ratio=1/2,
+                 action_max_keep_count=20,  # 最大保留动作数量
                  device="cuda" if torch.cuda.is_available() else "cpu"):
         self.model = model
         self.n_simulations = n_simulations
@@ -70,6 +71,7 @@ class MCTS:
         self.max_depth = max_depth
         self.max_search_time = max_search_time  # 搜索限时，单位：秒
         self.action_keep_ratio = action_keep_ratio  # 动作保留比例，用于控制保留的动作数量
+        self.action_max_keep_count = action_max_keep_count  # 最大保留动作数量
         self.device = device
         self.ball_radius = 0.028575
         
@@ -422,13 +424,136 @@ class MCTS:
         with torch.no_grad():
             out = self.model(state_tensor)
             value_output = out["value_output"].item()
+            policy_mapped_actions = out["mapped_actions"][0].cpu().numpy()
         
-        # 生成动作先验概率（简单使用均匀分布）
+        # 3️⃣ 使用policy网络进行动作裁剪
+        # 计算每个候选动作与policy输出的距离
+        action_distances = []
+        for action in candidate_actions:
+            # 将动作转换为numpy数组，顺序：V0, phi, theta, a, b
+            action_np = np.array([
+                action['V0'],
+                action['phi'],
+                action['theta'],
+                action['a'],
+                action['b']
+            ])
+            
+            # 计算各维度距离，考虑角度的周期性
+            dist_V0 = abs(action_np[0] - policy_mapped_actions[0])
+            dist_phi = min(abs(action_np[1] - policy_mapped_actions[1]), 360 - abs(action_np[1] - policy_mapped_actions[1]))
+            dist_theta = abs(action_np[2] - policy_mapped_actions[2])
+            dist_a = abs(action_np[3] - policy_mapped_actions[3])
+            dist_b = abs(action_np[4] - policy_mapped_actions[4])
+            
+            # 加权距离（可根据重要性调整权重）
+            total_dist = (dist_V0 * 0.2 + 
+                         dist_phi * 0.3 + 
+                         dist_theta * 0.1 + 
+                         dist_a * 0.2 + 
+                         dist_b * 0.2)
+            
+            action_distances.append((action, total_dist))
+        
+        # 按距离排序，先保留指定比例（action_keep_ratio），再进行top-K裁剪
+        action_distances.sort(key=lambda x: x[1])
+        
+        # 先计算比例保留数量
+        ratio_keep_count = max(1, int(len(action_distances) * self.action_keep_ratio))
+        
+        # 再取比例保留数量和最大保留数量的最小值
+        keep_count = min(ratio_keep_count, self.action_max_keep_count)
+        
+        filtered_actions = [action for action, dist in action_distances[:keep_count]]
+        
+        # 4️⃣ Value + 人工reward混合筛选
+        action_values = []
+        alpha = 0.5  # value与reward的加权系数
+        
+        for action in filtered_actions:
+            # 进行快速物理模拟
+            sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+            sim_table = copy.deepcopy(table)
+            last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in sim_balls.items()}
+            
+            shot = self.simulate_action(sim_balls, sim_table, action)
+            if shot is None:
+                continue
+            
+            # 计算raw_reward
+            reward = self.analyze_shot_for_reward(shot, last_state_snapshot, player_targets[root_player])
+            
+            # 检查是否为黑八违规（即时判负）
+            cue_ball = shot.balls.get('cue')
+            eight_ball = shot.balls.get('8')
+            cue_in_pocket = cue_ball and cue_ball.state.s == 4
+            eight_in_pocket = eight_ball and eight_ball.state.s == 4
+            
+            root_targets = player_targets[root_player]
+            non_eight_targets = [bid for bid in root_targets if bid != '8']
+            has_non_eight_targets_left = any(
+                bid in shot.balls and shot.balls[bid].state.s != 4 for bid in non_eight_targets
+            )
+            
+            if (cue_in_pocket and eight_in_pocket) or (eight_in_pocket and has_non_eight_targets_left):
+                # 黑八违规，直接给极值惩罚
+                reward = -500
+            
+            # 计算next_state_seq
+            new_state_vec = self._balls_state_to_81(
+                shot.balls,
+                my_targets=player_targets[root_player],
+                table=shot.table
+            )
+            next_state_seq = root.state_seq[1:] + [new_state_vec]
+            
+            # 获取模型value
+            state_tensor = self._state_seq_to_tensor(next_state_seq).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                out = self.model(state_tensor)
+                model_value = out["value_output"].item()
+            
+            # 归一化reward到[-1, 1]范围
+            # 基于reward的实际范围进行归一化
+            if reward > 150:  # 黑八胜利
+                normalized_reward = 1.0
+            elif reward < -500:  # 严重违规
+                normalized_reward = -1.0
+            else:
+                # 线性归一化到[-1, 1]
+                normalized_reward = reward / 500
+            
+            # 计算混合价值
+            blended_value = alpha * model_value + (1 - alpha) * normalized_reward
+            
+            action_values.append((action, blended_value))
+        
+        # 按混合价值排序，先保留指定比例（action_keep_ratio），再进行top-K裁剪
+        action_values.sort(key=lambda x: x[1], reverse=True)
+        
+        # 先计算比例保留数量
+        ratio_keep_count = max(1, int(len(action_values) * self.action_keep_ratio))
+        
+        # 再取比例保留数量和最大保留数量的最小值
+        value_keep_count = min(ratio_keep_count, self.action_max_keep_count)
+        
+        final_actions = [action for action, value in action_values[:value_keep_count]]
+        
+        # 生成动作先验概率：混合价值越高，先验概率越高
         action_priors = []
-        if candidate_actions:
-            uniform_prior = 1.0 / len(candidate_actions)
-            for action in candidate_actions:
-                action_priors.append((action, uniform_prior))
+        if final_actions:
+            # 计算混合价值的总和作为归一化因子
+            total_value = sum(value for action, value in action_values[:value_keep_count])
+            if total_value == 0:
+                # 如果总和为0，使用均匀分布
+                uniform_prior = 1.0 / len(final_actions)
+                for action in final_actions:
+                    action_priors.append((action, uniform_prior))
+            else:
+                # 混合价值越高，先验概率越高
+                for i, (action, value) in enumerate(action_values[:value_keep_count]):
+                    prior = value / total_value
+                    action_priors.append((action, prior))
         
         # 扩展根节点
         root.expand(action_priors)
@@ -587,8 +712,145 @@ class MCTS:
                             unique_actions.append(action)
                     candidate_actions = unique_actions
                 
-                # 生成均匀分布的先验概率
-                priors = [(a, 1.0 / len(candidate_actions)) for a in candidate_actions]
+                # 4. 使用policy网络进行动作裁剪（与根节点相同逻辑）
+                # 获取policy输出
+                state_tensor = self._state_seq_to_tensor(current_state_seq).unsqueeze(0).to(self.device)
+                with torch.no_grad():
+                    out = self.model(state_tensor)
+                    policy_mapped_actions = out["mapped_actions"][0].cpu().numpy()
+                
+                # 计算每个候选动作与policy输出的距离
+                action_distances = []
+                for action in candidate_actions:
+                    # 将动作转换为numpy数组，顺序：V0, phi, theta, a, b
+                    action_np = np.array([
+                        action['V0'],
+                        action['phi'],
+                        action['theta'],
+                        action['a'],
+                        action['b']
+                    ])
+                    
+                    # 计算各维度距离，考虑角度的周期性
+                    dist_V0 = abs(action_np[0] - policy_mapped_actions[0])
+                    dist_phi = min(abs(action_np[1] - policy_mapped_actions[1]), 360 - abs(action_np[1] - policy_mapped_actions[1]))
+                    dist_theta = abs(action_np[2] - policy_mapped_actions[2])
+                    dist_a = abs(action_np[3] - policy_mapped_actions[3])
+                    dist_b = abs(action_np[4] - policy_mapped_actions[4])
+                    
+                    # 加权距离（可根据重要性调整权重）
+                    total_dist = (dist_V0 * 0.2 + 
+                                 dist_phi * 0.3 + 
+                                 dist_theta * 0.1 + 
+                                 dist_a * 0.2 + 
+                                 dist_b * 0.2)
+                    
+                    action_distances.append((action, total_dist))
+                
+                # 按距离排序，先保留指定比例（action_keep_ratio），再进行top-K裁剪
+                action_distances.sort(key=lambda x: x[1])
+                
+                # 先计算比例保留数量
+                ratio_keep_count = max(1, int(len(action_distances) * self.action_keep_ratio))
+                
+                # 再取比例保留数量和最大保留数量的最小值
+                keep_count = min(ratio_keep_count, self.action_max_keep_count)
+                
+                filtered_actions = [action for action, dist in action_distances[:keep_count]]
+                
+                # 5. Value + 人工reward混合筛选（与根节点相同逻辑）
+                action_values = []
+                alpha = 0.5  # value与reward的加权系数
+                
+                for action in filtered_actions:
+                    # 进行快速物理模拟
+                    temp_balls = {bid: copy.deepcopy(ball) for bid, ball in sim_balls.items()}
+                    temp_table = copy.deepcopy(sim_table)
+                    last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in temp_balls.items()}
+                    
+                    shot = self.simulate_action(temp_balls, temp_table, action)
+                    if shot is None:
+                        continue
+                    
+                    # 计算raw_reward
+                    reward = self.analyze_shot_for_reward(shot, last_state_snapshot, player_targets[current_player])
+                    
+                    # 检查是否为黑八违规（即时判负）
+                    cue_ball = shot.balls.get('cue')
+                    eight_ball = shot.balls.get('8')
+                    cue_in_pocket = cue_ball and cue_ball.state.s == 4
+                    eight_in_pocket = eight_ball and eight_ball.state.s == 4
+                    
+                    current_targets = player_targets[current_player]
+                    non_eight_targets = [bid for bid in current_targets if bid != '8']
+                    has_non_eight_targets_left = any(
+                        bid in shot.balls and shot.balls[bid].state.s != 4 for bid in non_eight_targets
+                    )
+                    
+                    if (cue_in_pocket and eight_in_pocket) or (eight_in_pocket and has_non_eight_targets_left):
+                        # 黑八违规，直接给极值惩罚
+                        reward = -500
+                    
+                    # 计算next_state_seq
+                    new_state_vec = self._balls_state_to_81(
+                        shot.balls,
+                        my_targets=player_targets[current_player],
+                        table=shot.table
+                    )
+                    next_state_seq = current_state_seq[1:] + [new_state_vec]
+                    
+                    # 获取模型value
+                    state_tensor = self._state_seq_to_tensor(next_state_seq).unsqueeze(0).to(self.device)
+                    with torch.no_grad():
+                        out = self.model(state_tensor)
+                        model_value = out["value_output"].item()
+                    
+                    # 归一化reward到[-1, 1]范围
+                    if reward > 150:  # 黑八胜利
+                        normalized_reward = 1.0
+                    elif reward < -500:  # 严重违规
+                        normalized_reward = -1.0
+                    else:
+                        # 线性归一化到[-1, 1]
+                        normalized_reward = reward / 500
+                    
+                    # 计算混合价值
+                    blended_value = alpha * model_value + (1 - alpha) * normalized_reward
+                    
+                    action_values.append((action, blended_value))
+                
+                # 按混合价值排序，先保留指定比例（action_keep_ratio），再进行top-K裁剪
+                action_values.sort(key=lambda x: x[1], reverse=True)
+                
+                # 先计算比例保留数量
+                ratio_keep_count = max(1, int(len(action_values) * self.action_keep_ratio))
+                
+                # 再取比例保留数量和最大保留数量的最小值
+                value_keep_count = min(ratio_keep_count, self.action_max_keep_count)
+                
+                final_actions = [action for action, value in action_values[:value_keep_count]]
+                
+                # 生成动作先验概率：混合价值越高，先验概率越高
+                priors = []
+                if final_actions:
+                    # 计算混合价值的总和作为归一化因子
+                    total_value = sum(value for action, value in action_values[:value_keep_count])
+                    if total_value == 0:
+                        # 如果总和为0，使用均匀分布
+                        uniform_prior = 1.0 / len(final_actions)
+                        for action in final_actions:
+                            priors.append((action, uniform_prior))
+                    else:
+                        # 混合价值越高，先验概率越高
+                        for i, (action, value) in enumerate(action_values[:value_keep_count]):
+                            prior = value / total_value
+                            priors.append((action, prior))
+                else:
+                    # 兜底：如果没有筛选出动作，使用原始候选动作的均匀分布
+                    uniform_prior = 1.0 / len(candidate_actions)
+                    for action in candidate_actions[:5]:  # 最多保留5个
+                        priors.append((action, uniform_prior))
+                
                 node.expand(priors)
             
             # 4. Evaluation: 评估节点价值
@@ -655,10 +917,10 @@ class MCTS:
             bid in balls and balls[bid].state.s != 4 for bid in non_eight_targets
         )
         
-        # 即时判负：返回-1.0表示输局，价值语义正确
+        # 即时判负：返回-500表示输局，与物理模拟中的极值惩罚保持一致
         # 从root_player视角判断：如果root_player提前打进黑八或同时打进母球和黑八，则输
         if (cue_in_pocket and eight_in_pocket) or (eight_in_pocket and has_non_eight_targets_left):
-            return -1.0
+            return -500.0
         
         # ========== 2. 深度截断 ==========
         if depth >= remaining_hits:
