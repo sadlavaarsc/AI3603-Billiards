@@ -64,6 +64,10 @@ class MCTS:
                  max_search_time=30.0,
                  action_keep_ratio=1/2,
                  action_max_keep_count=20,  # 最大保留动作数量
+                 # Value剪枝相关参数
+                 value_prune_threshold=-0.6,  # 绝对阈值剪枝阈值
+                 value_relative_prune_ratio=0.3,  # 相对剪枝比例（剪掉bottom X%）
+                 max_sim_depth=3,  # 深度截断阈值
                  device="cuda" if torch.cuda.is_available() else "cpu"):
         self.model = model
         self.n_simulations = n_simulations
@@ -74,6 +78,11 @@ class MCTS:
         self.action_max_keep_count = action_max_keep_count  # 最大保留动作数量
         self.device = device
         self.ball_radius = 0.028575
+        
+        # Value剪枝相关参数
+        self.value_prune_threshold = value_prune_threshold  # 绝对阈值剪枝阈值
+        self.value_relative_prune_ratio = value_relative_prune_ratio  # 相对剪枝比例
+        self.max_sim_depth = max_sim_depth  # 深度截断阈值
         
         # 定义噪声水平
         self.sim_noise = {
@@ -623,13 +632,17 @@ class MCTS:
         # 按混合价值排序，先保留指定比例（action_keep_ratio），再进行top-K裁剪
         action_values.sort(key=lambda x: x[1], reverse=True)
         
+        # P0-Value剪枝：相对剪枝（推荐，鲁棒性更强）
+        # 这里是根节点搜索阶段，不应用深度相关的相对剪枝
+        pruned_action_values = action_values
+        
         # 先计算比例保留数量
-        ratio_keep_count = max(1, int(len(action_values) * self.action_keep_ratio))
+        ratio_keep_count = max(1, int(len(pruned_action_values) * self.action_keep_ratio))
         
         # 再取比例保留数量和最大保留数量的最小值
         value_keep_count = min(ratio_keep_count, self.action_max_keep_count)
         
-        final_actions = [action for action, value in action_values[:value_keep_count]]
+        final_actions = [action for action, value in pruned_action_values[:value_keep_count]]
         
         # 生成动作先验概率：混合价值越高，先验概率越高
         action_priors = []
@@ -776,6 +789,21 @@ class MCTS:
             
             # 3. Expansion: 如果节点未扩展，生成候选动作并扩展
             if not node.is_expanded and current_depth < remaining_hits:
+                # P0-Value剪枝：Expansion剪枝（最基础，必做）
+                # 先评估当前节点的value，如果过低则不展开子节点
+                leaf_value = self._evaluate_leaf(
+                    node, sim_balls, sim_table, player_targets,
+                    current_player, root_player, current_depth,
+                    remaining_hits - current_depth, current_state_seq
+                )
+                
+                # 检查是否需要剪枝
+                # current_depth ≥ 2 时应用绝对剪枝
+                if current_depth >= 2 and leaf_value < self.value_prune_threshold:
+                    # 直接回传value，不展开子节点
+                    path[-1].backup(leaf_value)
+                    continue
+                
                 # 检查是否为残局（只剩黑八一个球要打）
                 remaining_targets = [
                     bid for bid in player_targets[current_player]
@@ -1008,13 +1036,24 @@ class MCTS:
                 # 按混合价值排序，先保留指定比例（action_keep_ratio），再进行top-K裁剪
                 action_values.sort(key=lambda x: x[1], reverse=True)
                 
+                # P0-Value剪枝：相对剪枝（推荐，鲁棒性更强）
+                # depth=1时应用相对剪枝，保留top 60-70%
+                pruned_action_values = action_values
+                if current_depth == 1:
+                    # 计算相对剪枝阈值（剪掉bottom X%）
+                    values = [v for a, v in action_values]
+                    if len(values) > 1:
+                        # 保留top (1 - value_relative_prune_ratio)，即剪掉bottom value_relative_prune_ratio
+                        threshold = np.percentile(values, self.value_relative_prune_ratio * 100)
+                        pruned_action_values = [(a, v) for a, v in action_values if v >= threshold]
+                
                 # 先计算比例保留数量
-                ratio_keep_count = max(1, int(len(action_values) * self.action_keep_ratio))
+                ratio_keep_count = max(1, int(len(pruned_action_values) * self.action_keep_ratio))
                 
                 # 再取比例保留数量和最大保留数量的最小值
                 value_keep_count = min(ratio_keep_count, self.action_max_keep_count)
                 
-                final_actions = [action for action, value in action_values[:value_keep_count]]
+                final_actions = [action for action, value in pruned_action_values[:value_keep_count]]
                 
                 # 生成动作先验概率：混合价值越高，先验概率越高
                 priors = []
@@ -1110,6 +1149,14 @@ class MCTS:
         
         # ========== 2. 深度截断 ==========
         if depth >= remaining_hits:
+            state_tensor = self._state_seq_to_tensor(eval_state_seq).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                out = self.model(state_tensor)
+            return out["value_output"].item()
+        
+        # P0-Value剪枝：深度剪枝（AlphaZero风格）
+        # 当搜索已经足够深时，继续模拟的边际收益极低
+        if depth >= self.max_sim_depth:
             state_tensor = self._state_seq_to_tensor(eval_state_seq).unsqueeze(0).to(self.device)
             with torch.no_grad():
                 out = self.model(state_tensor)
