@@ -190,14 +190,7 @@ def generate_matches(num_matches, output_dir, enable_noise=True, max_hit_count=2
     model.eval()
     
     # 初始化MCTSAgent
-    agent = MCTSAgent(
-        model=model, 
-        env=env, 
-        n_simulations=5, 
-        n_action_samples=8, 
-        device=device, 
-        debug=verbose
-    )
+    agent = MCTSAgent(model=model, env=env, n_simulations=70, device=device)
     
     file_paths = []
     
