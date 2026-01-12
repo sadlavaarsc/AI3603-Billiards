@@ -494,7 +494,7 @@ class MCTS:
         
         # 收集所有需要评估的next_state_seq，用于批量化推理（P0-2优化）
         state_seqs_to_evaluate = []
-        action_to_eval_idx = {}  # 记录动作到评估索引的映射
+        action_to_eval_idx = {}  # 记录动作id到评估索引的映射
         cache_misses = []  # 记录需要进行物理仿真的动作
         
         for action in filtered_actions:
@@ -511,7 +511,8 @@ class MCTS:
                 # 计算next_state_seq
                 next_state_seq = root.state_seq[1:] + [cached['next_state_vec']]
                 state_seqs_to_evaluate.append(next_state_seq)
-                action_to_eval_idx[action] = len(state_seqs_to_evaluate) - 1
+                # 使用action_id作为键，而不是action字典
+                action_to_eval_idx[action_id] = len(state_seqs_to_evaluate) - 1
         
         # 对缓存未命中的动作进行物理仿真
         for action in cache_misses:
@@ -576,7 +577,8 @@ class MCTS:
             # 计算next_state_seq用于模型评估
             next_state_seq = root.state_seq[1:] + [new_state_vec]
             state_seqs_to_evaluate.append(next_state_seq)
-            action_to_eval_idx[action] = len(state_seqs_to_evaluate) - 1
+            # 使用action_id作为键，而不是action字典
+            action_to_eval_idx[action_id] = len(state_seqs_to_evaluate) - 1
         
         # 批量化模型推理（P0-2优化）
         model_values = {}
@@ -599,8 +601,8 @@ class MCTS:
                 batch_value_outputs = out["value_output"].cpu().numpy()
                 
                 # 将批量化结果映射回动作
-                for action, idx in action_to_eval_idx.items():
-                    model_values[action] = batch_value_outputs[idx][0]
+                for action_id, idx in action_to_eval_idx.items():
+                    model_values[action_id] = batch_value_outputs[idx][0]
         
         # 计算混合价值
         for action in filtered_actions:
@@ -612,7 +614,8 @@ class MCTS:
             
             cached = action_cache[action_id]
             reward = cached['raw_reward']
-            model_value = model_values[action]
+            # 使用action_id作为键，而不是action字典
+            model_value = model_values[action_id]
             
             # 归一化reward到[-1, 1]范围
             # 基于reward的实际范围进行归一化
@@ -894,7 +897,7 @@ class MCTS:
                 
                 # 收集所有需要评估的next_state_seq，用于批量化推理
                 state_seqs_to_evaluate = []
-                action_to_eval_idx = {}  # 记录动作到评估索引的映射
+                action_to_eval_idx = {}  # 记录动作id到评估索引的映射
                 cache_misses = []  # 记录需要进行物理仿真的动作
                 
                 for action in filtered_actions:
@@ -911,7 +914,8 @@ class MCTS:
                         # 计算next_state_seq
                         next_state_seq = current_state_seq[1:] + [cached['next_state_vec']]
                         state_seqs_to_evaluate.append(next_state_seq)
-                        action_to_eval_idx[action] = len(state_seqs_to_evaluate) - 1
+                        # 使用action_id作为键，而不是action字典
+                        action_to_eval_idx[action_id] = len(state_seqs_to_evaluate) - 1
                 
                 # 对缓存未命中的动作进行物理仿真
                 for action in cache_misses:
@@ -976,7 +980,8 @@ class MCTS:
                     # 计算next_state_seq用于模型评估
                     next_state_seq = current_state_seq[1:] + [new_state_vec]
                     state_seqs_to_evaluate.append(next_state_seq)
-                    action_to_eval_idx[action] = len(state_seqs_to_evaluate) - 1
+                    # 使用action_id作为键，而不是action字典
+                    action_to_eval_idx[action_id] = len(state_seqs_to_evaluate) - 1
                 
                 # 批量化模型推理
                 model_values = {}
@@ -999,8 +1004,8 @@ class MCTS:
                         batch_value_outputs = out["value_output"].cpu().numpy()
                         
                         # 将批量化结果映射回动作
-                        for action, idx in action_to_eval_idx.items():
-                            model_values[action] = batch_value_outputs[idx][0]
+                for action_id, idx in action_to_eval_idx.items():
+                    model_values[action_id] = batch_value_outputs[idx][0]
                 
                 # 计算混合价值
                 for action in filtered_actions:
@@ -1014,10 +1019,11 @@ class MCTS:
                     reward = cached['raw_reward']
                     
                     # 检查模型值是否存在
-                    if action not in model_values:
+                    if action_id not in model_values:
                         continue
                     
-                    model_value = model_values[action]
+                    # 使用action_id作为键，而不是action字典
+                    model_value = model_values[action_id]
                     
                     # 归一化reward到[-1, 1]范围
                     if reward > 150:  # 黑八胜利
