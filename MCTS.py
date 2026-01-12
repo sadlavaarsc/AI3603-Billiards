@@ -60,6 +60,34 @@ class MCTSNode:
 
 # ============ Multi-step MCTS ============
 class MCTS:
+    # 分层搜索配置：定义不同深度的搜索策略
+    SEARCH_PROFILE = {
+        0: {  # root
+            "candidate_samples": 50,
+            "policy_keep": 0.25,
+            "max_children": 50,
+            "allow_strong_ai": False
+        },
+        1: {
+            "candidate_samples": 1,
+            "policy_keep": 0.2,
+            "max_children": 20,
+            "allow_strong_ai": True
+        },
+        2: {
+            "candidate_samples": 1,
+            "policy_keep": 0.15,
+            "max_children": 5,
+            "allow_strong_ai": True
+        },
+        3: {  # 极深层
+            "candidate_samples": 1,
+            "policy_keep": 1.0,
+            "max_children": 1,
+            "allow_strong_ai": True
+        }
+    }
+    
     def __init__(self,
                  model,
                  n_simulations=100,
@@ -99,6 +127,10 @@ class MCTS:
         self.state_preprocessor = StatePreprocessor()
         
         print("Multi-step MCTS 已初始化。")
+        
+        # 强单步AI参数
+        self.strong_ai_n_simulations = 20  # 强单步AI的仿真次数
+        self.strong_ai_c_puct = 1.414  # 强单步AI的探索系数
 
     def _calc_angle_degrees(self, v):
         angle = math.degrees(math.atan2(v[1], v[0]))
@@ -794,6 +826,29 @@ class MCTS:
             
             # 3. Expansion: 如果节点未扩展，生成候选动作并扩展
             if not node.is_expanded and current_depth < remaining_hits:
+                # Step 1: 读取当前深度的搜索配置
+                cfg = self.SEARCH_PROFILE.get(current_depth, self.SEARCH_PROFILE[max(self.SEARCH_PROFILE.keys())])
+                
+                # Step 2: 是否直接退化为强单步AI
+                use_strong_ai = False
+                # 检查是否满足强单步AI条件
+                if cfg["allow_strong_ai"] and (
+                    cfg["candidate_samples"] == 1 or 
+                    cfg["max_children"] == 1
+                ):
+                    use_strong_ai = True
+                
+                if use_strong_ai:
+                    # 直接使用强单步AI生成唯一动作
+                    action = self._strong_single_step_ai(
+                        sim_balls, 
+                        player_targets[current_player], 
+                        sim_table
+                    )
+                    node.expand([(action, 1.0)])
+                    continue
+                
+                # 常规扩展流程
                 # P0-Value剪枝：Expansion剪枝
                 # 先评估当前节点的value，如果过低则不展开子节点
                 leaf_value = self._evaluate_leaf(
@@ -809,6 +864,7 @@ class MCTS:
                     path[-1].backup(leaf_value)
                     continue
                 
+                # Step 3: 候选动作生成（启发式 + 随机）
                 # 检查是否为残局（只剩黑八一个球要打）
                 remaining_targets = [
                     bid for bid in player_targets[current_player]
@@ -825,6 +881,9 @@ class MCTS:
                     sim_table,
                     only_eight_ball=only_eight_ball
                 )
+                
+                # 限制候选动作数量
+                candidate_actions = candidate_actions[:cfg["candidate_samples"]]
                 
                 # 如果只剩黑八，确保包含打黑八的动作
                 if is_endgame:
@@ -845,7 +904,12 @@ class MCTS:
                         if action_tuple not in seen:
                             seen.add(action_tuple)
                             unique_actions.append(action)
-                    candidate_actions = unique_actions
+                    # 再次限制数量
+                    candidate_actions = unique_actions[:cfg["candidate_samples"]]
+                
+                if not candidate_actions:
+                    # 兜底：如果没有生成候选动作，使用随机动作
+                    candidate_actions = [self._random_action() for _ in range(min(cfg["candidate_samples"], 5))]
                 
                 # 4. 使用policy网络进行动作裁剪（与根节点相同逻辑）
                 # 获取policy输出
@@ -882,19 +946,18 @@ class MCTS:
                     
                     action_distances.append((action, total_dist))
                 
-                # 按距离排序，先保留指定比例（action_keep_ratio），再进行top-K裁剪
+                # Step 4: Policy 网络裁剪
+                # 按距离排序
                 action_distances.sort(key=lambda x: x[1])
                 
-                # 先计算比例保留数量
-                ratio_keep_count = max(1, int(len(action_distances) * self.action_keep_ratio))
+                # 计算需要保留的动作数量
+                keep_n = min(
+                    int(len(action_distances) * cfg["policy_keep"]),
+                    cfg["max_children"]
+                )
+                keep_n = max(1, keep_n)  # 至少保留1个动作
                 
-                # 再取比例保留数量和最大保留数量的最小值
-                keep_count = min(ratio_keep_count, self.action_max_keep_count)
-                
-                # 修复：Expansion阶段filtered_actions ≤ 5
-                keep_count = min(keep_count, 5)
-                
-                filtered_actions = [action for action, dist in action_distances[:keep_count]]
+                filtered_actions = [action for action, dist in action_distances[:keep_n]]
                 
                 # 5. Value + 人工reward混合筛选（使用动作缓存和批量化推理）
                 action_values = []
@@ -1127,6 +1190,70 @@ class MCTS:
             ],
             dtype=np.float32
         )
+    
+    def _strong_single_step_ai(self, balls, my_targets, table):
+        """强单步AI：基于有限MCTS的单步决策
+        
+        参数：
+            balls: 球状态字典
+            my_targets: 当前玩家的目标球列表
+            table: 球桌对象
+        
+        返回：
+            dict: 最佳动作
+        """
+        # 预处理
+        remaining = [bid for bid in my_targets if balls[bid].state.s != 4]
+        if len(remaining) == 0: 
+            my_targets = ["8"]
+        last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+
+        # 生成候选动作
+        candidate_actions = self.generate_heuristic_actions(balls, my_targets, table)
+        n_candidates = len(candidate_actions)
+        
+        if n_candidates == 0:
+            return self._random_action()
+        
+        N = np.zeros(n_candidates)
+        Q = np.zeros(n_candidates)
+        
+        # 有限次数的MCTS循环
+        for i in range(self.strong_ai_n_simulations):
+            # Selection (UCB)
+            if i < n_candidates:
+                idx = i
+            else:
+                total_n = np.sum(N)
+                # 使用归一化后的 Q 进行计算
+                ucb_values = (Q / (N + 1e-6)) + self.strong_ai_c_puct * np.sqrt(np.log(total_n + 1) / (N + 1e-6))
+                idx = np.argmax(ucb_values)
+            
+            # Simulation (带噪声)
+            shot = self.simulate_action(balls, table, candidate_actions[idx])
+
+            # Evaluation
+            if shot is None:
+                raw_reward = -500.0
+            else:
+                raw_reward = self.analyze_shot_for_reward(shot, last_state_snapshot, my_targets)
+            
+            # 映射公式: (val - min) / (max - min)
+            normalized_reward = (raw_reward - (-500)) / 650.0
+            # 截断一下防止越界
+            normalized_reward = np.clip(normalized_reward, 0.0, 1.0)
+
+            # Backpropagation
+            N[idx] += 1
+            Q[idx] += normalized_reward # 累加归一化后的分数
+
+        # Final Decision
+        # 选平均分最高的 (Robust Child)
+        avg_rewards = Q / (N + 1e-6)
+        best_idx = np.argmax(avg_rewards)
+        best_action = candidate_actions[best_idx]
+        
+        return best_action
     
     def _evaluate_leaf(self, node, balls, table, player_targets, current_player, root_player, depth, remaining_hits, eval_state_seq):
         """评估叶子节点
