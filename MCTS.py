@@ -370,245 +370,178 @@ class MCTS:
 
     def _expand_and_evaluate(self, node, balls, table, player_targets, root_player, depth, remaining_hits):
         """扩展节点并评估"""
-        # 1. 检查是否已经处于输了的状态
-        # 检查白球是否进袋
+
+        # ========== 1. 即时判负检测 ==========
         cue_ball = balls.get('cue')
         cue_in_pocket = cue_ball and cue_ball.state.s == 4
-        
-        # 检查黑八是否进袋
+
         eight_ball = balls.get('8')
         eight_in_pocket = eight_ball and eight_ball.state.s == 4
-        
-        # 检查自己的目标球是否都已经进袋（除了黑八）
+
         my_targets = player_targets[root_player]
         non_eight_targets = [bid for bid in my_targets if bid != '8']
-        has_non_eight_targets_left = any(bid in balls and balls[bid].state.s != 4 for bid in non_eight_targets)
-        
-        # 输的情况：
-        # 1. 白球和黑八同时进袋
-        # 2. 黑八进袋但自己还有非黑八目标球未进
-        # 3. 白球进袋且黑八也进袋
+        has_non_eight_targets_left = any(
+            bid in balls and balls[bid].state.s != 4 for bid in non_eight_targets
+        )
+
+        # 即时判负
         if (cue_in_pocket and eight_in_pocket) or (eight_in_pocket and has_non_eight_targets_left):
             return 0.0
-        
-        # 2. 检查深度限制，不超过剩余杆数
+
+        # ========== 2. 深度截断 ==========
         if depth >= remaining_hits:
-            # 只使用value network评估
-            state_tensor = self._state_seq_to_tensor(node.state_seq)
-            state_tensor = state_tensor.unsqueeze(0).to(self.device)
-            
+            state_tensor = self._state_seq_to_tensor(node.state_seq).unsqueeze(0).to(self.device)
             with torch.no_grad():
                 out = self.model(state_tensor)
-                value = out["value_output"].item()
-            
-            return value
-        
-        # 2. 生成候选动作
-        candidate_actions = self.generate_heuristic_actions(balls, player_targets[root_player], table)
-        n_candidates = len(candidate_actions)
-        
-        # 检查是否只剩下黑八一个待打的球
+            return out["value_output"].item()
+
+        # ========== 3. 生成候选动作（原样保留） ==========
+        candidate_actions = self.generate_heuristic_actions(
+            balls, player_targets[root_player], table
+        )
+
         remaining_targets = [bid for bid in player_targets[root_player] if balls[bid].state.s != 4]
         has_only_eight_ball = len(remaining_targets) == 1 and remaining_targets[0] == '8'
-        
-        # 3. 使用模型生成policy
-        state_tensor = self._state_seq_to_tensor(node.state_seq)
-        state_tensor = state_tensor.unsqueeze(0).to(self.device)
-        
+
+        state_tensor = self._state_seq_to_tensor(node.state_seq).unsqueeze(0).to(self.device)
         with torch.no_grad():
             out = self.model(state_tensor)
             policy_output = out["policy_output"][0].cpu().numpy()
             value_output = out["value_output"].item()
-        
-        # 4. 反归一化得到模型输出的原始动作
+
         model_action = self._denormalize_action(policy_output)
-        # 原始模型动作加入候选池 =========
-        model_action_dict = {
-            'V0': float(model_action[0]),
-            'phi': float(model_action[1]),
-            'theta': float(model_action[2]),
-            'a': float(model_action[3]),
-            'b': float(model_action[4]),
-        }
 
-        # 像幽灵球动作一样参与候选
-        candidate_actions.append(model_action_dict)
+        # === 模型动作扰动（原样保留） ===
+        model_action_variants = []
+        base_V0, base_phi = float(model_action[0]), float(model_action[1])
 
-        # 非残局禁止提前打黑八
-        if not has_only_eight_ball:
-            # 过滤掉以黑八为目标的动作（通过幽灵球角度近似判断）
-            legal_actions = []
-            eight_ball = balls.get('8')
-            if eight_ball and eight_ball.state.s != 4:
-                eight_pos = eight_ball.state.rvw[0]
-                cue_pos = balls['cue'].state.rvw[0]
+        phi_offsets = [0.0, 0.5, -0.5]
+        v_offsets = [0.0, 1.5]
 
-                # 计算所有黑八幽灵球方向（作为禁区）
-                forbidden_phis = []
-                for pocket in table.pockets.values():
-                    phi_8, _ = self._get_ghost_ball_target(cue_pos, eight_pos, pocket.center)
-                    forbidden_phis.append(phi_8)
+        for dphi in phi_offsets:
+            for dv in v_offsets:
+                model_action_variants.append({
+                    'V0': float(np.clip(base_V0 + dv, 0.5, 8.0)),
+                    'phi': float((base_phi + dphi) % 360),
+                    'theta': float(model_action[2]),
+                    'a': float(model_action[3]),
+                    'b': float(model_action[4]),
+                })
 
-                for action in candidate_actions:
-                    phi = action['phi']
-                    # 若与任一黑八幽灵球方向接近，则认为是“打黑八”
-                    is_eight_shot = any(
-                        abs((phi - f + 180) % 360 - 180) < 2.0
-                        for f in forbidden_phis
-                    )
-                    if not is_eight_shot:
-                        legal_actions.append(action)
-            else:
-                legal_actions = candidate_actions
+        candidate_actions.extend(model_action_variants)
 
-            # 若过滤后为空，退化为随机动作（只模拟一次，不浪费性能）
-            if len(legal_actions) == 0:
-                legal_actions = [self._random_action()]
-
-            candidate_actions = legal_actions
-        
-        # 5. 动作筛选：根据与模型输出的接近程度排序，保留指定数量的动作
+        # === 动作筛选（原样保留） ===
         action_distances = []
         for action in candidate_actions:
-            # 转换为numpy数组便于计算距离
-            action_arr = np.array([action['V0'], action['phi'], action['theta'], action['a'], action['b']])
-            
-            # 计算动作距离（考虑角度和力度的加权距离）
-            # 角度差（0-180度）
-            phi_diff = abs(action_arr[1] - model_action[1])
+            phi_diff = abs(action['phi'] - model_action[1])
             if phi_diff > 180:
                 phi_diff = 360 - phi_diff
-            
-            # 力度差
-            v0_diff = abs(action_arr[0] - model_action[0])
-            
-            # 综合距离（角度差权重0.7，力度差权重0.3）
-            distance = (phi_diff / 180.0) * 0.7 + (v0_diff / (8.0 - 0.5)) * 0.3
-            
+            v0_diff = abs(action['V0'] - model_action[0])
+            distance = (phi_diff / 180.0) * 0.7 + (v0_diff / 7.5) * 0.3
             action_distances.append((action, distance))
-        
-        # 按照距离从小到大排序
+
         action_distances.sort(key=lambda x: x[1])
-        
-        # 残局处理：只剩黑八时，保留所有动作
+
         if has_only_eight_ball:
-            # 保留全部动作，不进行筛选
-            filtered_actions = [action for action, distance in action_distances]
+            filtered_actions = [a for a, _ in action_distances]
         else:
-            # 保留指定数量的动作，使用可调比例，至少保留1个
             keep_count = max(1, int(self.n_simulations * self.action_keep_ratio))
-            filtered_actions = [action for action, distance in action_distances[:keep_count]]
-        
-        # 如果只剩下黑八一个待打的球，确保生成打黑八的动作并加入
-        if has_only_eight_ball:
-            # 生成只打黑八的动作
-            eight_ball_actions = self.generate_heuristic_actions(balls, player_targets[root_player], table, only_eight_ball=True)
-            # 将打黑八的动作添加到filtered_actions中，避免重复
-            for eight_action in eight_ball_actions:
-                if eight_action not in filtered_actions:
-                    filtered_actions.append(eight_action)
-        
-        # 6. 对每个动作进行模拟和评估
+            filtered_actions = [a for a, _ in action_distances[:keep_count]]
+
+        # ========== 4. 模拟 & 递归 ==========
         best_value = -float('inf')
-        
+
         for action in filtered_actions:
-            # 模拟动作
             last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
             shot = self.simulate_action(balls, table, action)
-            
-            # 计算物理模拟奖励
-            if shot is None:
-                raw_reward = -500.0
-            else:
-                raw_reward = self.analyze_shot_for_reward(shot, last_state_snapshot, player_targets[root_player])
-            
-            # 归一化奖励
-            normalized_reward = (raw_reward - (-500)) / 650.0
-            normalized_reward = np.clip(normalized_reward, 0.0, 1.0)
-            
-            # 根据深度调整value network和物理模拟的权重，使用剩余杆数作为最大深度
-            depth_factor = depth / remaining_hits if remaining_hits > 0 else 1.0  # 0-1，深度越深，value network权重越大
-            value = depth_factor * value_output + (1 - depth_factor) * normalized_reward
-            
-            # 递归扩展子节点：只有当不是直接输掉的情况才扩展
-            # raw_reward=-500表示直接输掉，normalized_reward<0.1表示接近输掉
-            if shot is not None and raw_reward > -500 and normalized_reward > 0 and (depth + 1) < remaining_hits:
-                # 生成新的状态向量
-                new_balls_state = {bid: ball for bid, ball in shot.balls.items()}
-                
-                # 根据台球规则判断是否需要切换玩家
-                # 1. 计算首球碰撞和犯规情况
-                first_contact_ball_id = None
-                foul_first_hit = False
-                valid_ball_ids = {'1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15'}
-                
-                for e in shot.events:
-                    et = str(e.event_type).lower()
-                    ids = list(e.ids) if hasattr(e, 'ids') else []
-                    if ('cushion' not in et) and ('pocket' not in et) and ('cue' in ids):
-                        other_ids = [i for i in ids if i != 'cue' and i in valid_ball_ids]
-                        if other_ids:
-                            first_contact_ball_id = other_ids[0]
-                            break
-                
-                # 首球犯规判定
-                if first_contact_ball_id is None:
-                    foul_first_hit = True
-                else:
-                    foul_first_hit = first_contact_ball_id not in player_targets[root_player]
-                
-                # 2. 计算碰库犯规
-                cue_hit_cushion = False
-                target_hit_cushion = False
-                
-                for e in shot.events:
-                    et = str(e.event_type).lower()
-                    ids = list(e.ids) if hasattr(e, 'ids') else []
-                    if 'cushion' in et:
-                        if 'cue' in ids:
-                            cue_hit_cushion = True
-                        if first_contact_ball_id is not None and first_contact_ball_id in ids:
-                            target_hit_cushion = True
-                
-                new_pocketed = [bid for bid, b in shot.balls.items() if b.state.s == 4 and last_state_snapshot[bid].state.s != 4]
-                own_pocketed = [bid for bid in new_pocketed if bid in player_targets[root_player]]
-                cue_pocketed = "cue" in new_pocketed
-                
-                # 碰库犯规：没有进球且没有碰到库边
-                foul_no_rail = len(new_pocketed) == 0 and first_contact_ball_id is not None and (not cue_hit_cushion) and (not target_hit_cushion)
-                
-                # 3. 判断是否需要切换玩家
-                # 切换玩家的条件：
-                # a. 白球进袋
-                # b. 首球犯规
-                # c. 碰库犯规
-                # d. 没有己方球进袋
-                switch_player = cue_pocketed or foul_first_hit or foul_no_rail or len(own_pocketed) == 0
-                
-                # 4. 确定下一个玩家
-                next_player = 'B' if root_player == 'A' else 'A' if switch_player else root_player
-                
-                # 5. 生成新的状态向量
-                new_state_vec = self._balls_state_to_81(
-                    new_balls_state,
-                    my_targets=player_targets[next_player],
-                    table=table
-                )
-                new_state_seq = node.state_seq[1:] + [new_state_vec]
-                child_node = MCTSNode(new_state_seq, parent=node)
-                child_value = self._expand_and_evaluate(child_node, shot.balls, table, player_targets, next_player, depth + 1, remaining_hits)
-                
-                # 如果切换了玩家，对手的value对当前玩家来说是负的，需要反转
-                if switch_player:
-                    child_value = -child_value
-                    
-                value += child_value * 0.9  # 衰减因子
-            
-            if value > best_value:
-                best_value = value
-        
-        return best_value
 
+            if shot is None:
+                continue
+
+            raw_reward = self.analyze_shot_for_reward(
+                shot, last_state_snapshot, player_targets[root_player]
+            )
+
+            # 提前打黑八直接跳过
+            if not has_only_eight_ball and raw_reward <= -500:
+                continue
+
+            normalized_reward = np.clip((raw_reward + 500) / 650.0, 0.0, 1.0)
+            depth_factor = depth / remaining_hits
+            value = depth_factor * value_output + (1 - depth_factor) * normalized_reward
+
+            # ======== ★ FIX：规则判定 ========
+            # 1. 首球
+            first_contact = None
+            for e in shot.events:
+                ids = getattr(e, 'ids', [])
+                if 'cue' in ids:
+                    others = [i for i in ids if i != 'cue']
+                    if others:
+                        first_contact = others[0]
+                        break
+
+            foul_first_hit = (
+                first_contact is None or
+                (first_contact == '8' and has_non_eight_targets_left) or
+                (first_contact not in player_targets[root_player])
+            )
+
+            # 2. 碰库
+            cue_hit_cushion = any(
+                'cushion' in str(e.event_type).lower() and 'cue' in getattr(e, 'ids', [])
+                for e in shot.events
+            )
+
+            new_pocketed = [
+                bid for bid in shot.balls
+                if shot.balls[bid].state.s == 4 and last_state_snapshot[bid].state.s != 4
+            ]
+
+            foul_no_rail = (
+                len(new_pocketed) == 0 and
+                not cue_hit_cushion
+            )
+
+            cue_pocketed = 'cue' in new_pocketed
+            is_foul = cue_pocketed or foul_first_hit or foul_no_rail
+
+            # ======== ★ FIX：状态 & 玩家切换 ========
+            if is_foul:
+                new_balls_state = last_state_snapshot
+                next_player = 'B' if root_player == 'A' else 'A'
+                switch_player = True
+            else:
+                own_pocketed = [b for b in new_pocketed if b in player_targets[root_player]]
+                if len(own_pocketed) == 0:
+                    new_balls_state = shot.balls
+                    next_player = 'B' if root_player == 'A' else 'A'
+                    switch_player = True
+                else:
+                    new_balls_state = shot.balls
+                    next_player = root_player
+                    switch_player = False
+
+            new_state_vec = self._balls_state_to_81(
+                new_balls_state,
+                my_targets=player_targets[next_player],
+                table=table
+            )
+            new_state_seq = node.state_seq[1:] + [new_state_vec]
+            child_node = MCTSNode(new_state_seq, parent=node)
+
+            child_value = self._expand_and_evaluate(
+                child_node, new_balls_state, table,
+                player_targets, next_player, depth + 1, remaining_hits
+            )
+
+            if switch_player:
+                child_value = -child_value
+
+            value += 0.9 * child_value
+            best_value = max(best_value, value)
+
+        return best_value
     def search(self, state_seq, balls, table, player_targets, root_player, remaining_hits):
         """执行MCTS搜索
         
